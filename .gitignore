@@ -1,0 +1,21 @@
+# === Ignore everything ===
+*
+
+# === Allow directory structure ===
+!*/
+
+# === Allow only Python files ===
+!*.py
+
+# === Always keep .gitignore itself ===
+!.gitignore
+
+# 忽略所有 Python 虛擬環境
+.venv/
+venv/
+env/
+ENV/
+*/.venv/
+*/venv/
+*/env/
+*/ENV/
