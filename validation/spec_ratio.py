@@ -40,7 +40,7 @@ s_eff = effective_grid_km_equal_area(lat, lon)  # 平均格距 (km)
 H_sub, W_sub = lat.shape
 L_eff = s_eff * min(H_sub, W_sub)                       # 有效邊長 (km)
 
-data = np.load('all_spectral_data2024.npz')
+data = np.load('all_energy_data.npz')
 variables = ['z500', 'q700', 't850', 'u850', 'v850']
 
 eps = 1e-12  # 避免除以零

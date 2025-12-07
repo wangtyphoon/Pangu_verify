@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import os
 from subset import extract_subset
-import matplotlib.pyplot as plt
 
 # ---------------- 基本設定（保持你的設定不變） ----------------
 z500_channel = 0
@@ -24,10 +23,12 @@ nc_path      = r'../forecasts\2020-05-05-00-00\upper.nc'
 
 LAT_RANGE = (2.25, 45.50)
 LON_RANGE = (104.5, 147.75)
+APPLY_LAT_WEIGHT = False      # 是否套用緯度面積權重（cos(lat)）
+AMPLITUDE_SPECTRUM = False    # True: 幅度譜；False: 功率譜
+DETREND_MEAN = False          # 是否去除（加權）平均
+DENSITY_NORM = False         # 是否做頻譜密度正規化
 
 # ---------------- 面積權重工具函式（等經緯度格網） ----------------
-R_EARTH = 6371.0  # km
-
 def select_bbox_indices(lat2d, lon2d, lat_range, lon_range):
     lat_min, lat_max = min(lat_range), max(lat_range)
     lon_min, lon_max = min(lon_range), max(lon_range)
@@ -37,61 +38,58 @@ def select_bbox_indices(lat2d, lon2d, lat_range, lon_range):
     x0, x1 = xs.min(), xs.max() + 1
     return slice(y0, y1), slice(x0, x1)
 
-def cell_area_weights(lat2d, lon2d):
+# ---------------- 徑向譜計算（參考 spectrum_same） ----------------
+def radial_power_spectrum(field2d,
+                          area2d=None,
+                          detrend_mean=True,
+                          amplitude=True,
+                          density_norm=False):
     """
-    在規則經緯度網格上，用 sin(phi) 帶狀積分近似每格面積：
-    A_i,j ≈ R^2 * (sin(phi_n) - sin(phi_s)) * dlon
-    備註：只需相對權重，因此無需乘上常數比例因子。
-    """
-    if lat2d.ndim == 1 and lon2d.ndim == 1:
-        lat2d, lon2d = np.meshgrid(lat2d, lon2d, indexing='ij')
-
-    lat1d = lat2d[:, 0]
-    lon1d = lon2d[0, :]
-
-    # 度→弧度的步長（假設規則格網）
-    dlat = np.deg2rad(np.abs(np.diff(lat1d).mean()))
-    dlon = np.deg2rad(np.abs(np.diff(lon1d).mean()))
-
-    phi_c = np.deg2rad(lat1d)
-    phi_n = phi_c + 0.5 * dlat
-    phi_s = phi_c - 0.5 * dlat
-
-    strip = (np.sin(phi_n) - np.sin(phi_s)) * dlon      # 每條緯帶的面積比例
-    A = np.repeat(strip[:, None], lon1d.size, axis=1)   # 擴展到 2D
-    return A
-
-# ---------------- 只加入「面積加權」的徑向譜 ----------------
-def radial_spectrum_2d_areaweighted(field2d, area2d):
-    """
-    與你原本的 radial_spectrum_2d 幾乎相同，
-    差別：FFT 之前做「面積加權去均值」並乘上 sqrt(area)。
-    其餘（徑向分箱、k 定義）完全不變。
+    面積加權幅度/功率徑向譜：
+      1) (可選) 面積加權去均值，乘上 sqrt(A_norm)
+      2) 2D FFT → |F| 或 |F|^2
+      3) 以像素半徑做徑向平均
     """
     H, W = field2d.shape
-    assert area2d.shape == (H, W), "area2d 形狀需與 field2d 相同"
 
-    # 規模化面積以避免數值過大/過小，但保留相對權重
-    A = area2d / np.mean(area2d)
+    if area2d is not None:
+        if area2d.shape != (H, W):
+            raise ValueError(f"area2d 形狀需為 {(H, W)}，目前是 {area2d.shape}")
+        A = area2d.astype(np.float64, copy=False)
+        A = A / np.nanmean(A)
+        if detrend_mean:
+            mean_w = np.nansum(field2d * A) / np.nansum(A)
+        else:
+            mean_w = 0.0
+        x = (field2d.astype(np.float64) - mean_w) * np.sqrt(A)
+    else:
+        x = field2d.astype(np.float64, copy=False)
+        if detrend_mean:
+            x = x - np.nanmean(x)
 
-    # 面積加權去均值
-    mean_w = np.sum(field2d * A) / np.sum(A)
-    f = (field2d - mean_w) * np.sqrt(A)
+    F = np.fft.fft2(x)
+    F = np.fft.fftshift(F)
 
-    # 與原本相同的 FFT → 幅度 → 徑向分箱
-    fft2 = np.fft.fftshift(np.fft.fft2(f))
-    amp = np.abs(fft2)
+    if amplitude:
+        P = np.abs(F)
+        if density_norm:
+            P = P / (H * W)
+    else:
+        P = np.abs(F) ** 2
+        if density_norm:
+            P = P / (H * W) ** 2
 
     cy, cx = H // 2, W // 2
-    y, x = np.indices((H, W))
-    r = np.sqrt((x - cx)**2 + (y - cy)**2).astype(int)
-    max_r = min(cx, cy)
+    y, xg = np.indices((H, W))
+    r = np.sqrt((xg - cx)**2 + (y - cy)**2).astype(int)
+    kmax = min(cx, cy) + 1
 
-    bin_sum   = np.bincount(r.ravel(), amp.ravel(), minlength=max_r+1)
-    bin_count = np.bincount(r.ravel(),               minlength=max_r+1)
-    radial_mean = bin_sum[:max_r+1] / np.maximum(bin_count[:max_r+1], 1)
-    k = np.arange(max_r+1)  # 與你原本一致（像素半徑）
-    return k, radial_mean
+    spec_sum = np.bincount(r.ravel(), weights=P.ravel(), minlength=kmax)
+    spec_cnt = np.bincount(r.ravel(), minlength=kmax)
+    spec = spec_sum[:kmax] / np.maximum(spec_cnt[:kmax], 1)
+
+    k = np.arange(kmax)
+    return k, spec
 
 # --------- 載入經緯度，先把子區的面積權重算好（一次即可） ---------
 LAT_ALL = np.load("../lat.npy")   # 可為 1D 或 2D
@@ -101,8 +99,7 @@ if LAT_ALL.ndim == 1 and LON_ALL.ndim == 1:
 
 ys, xs = select_bbox_indices(LAT_ALL, LON_ALL, LAT_RANGE, LON_RANGE)
 LAT_SUB = LAT_ALL[ys, xs].copy()
-LON_SUB = LON_ALL[ys, xs].copy()
-AREA_SUB = cell_area_weights(LAT_SUB, LON_SUB)  # 與 extract_subset 同一子區
+AREA_SUB = np.cos(np.deg2rad(LAT_SUB)) if APPLY_LAT_WEIGHT else None
 
 # ---------------- 你的原流程，僅替換呼叫的頻譜函式 ----------------
 variables = list(channel_level_map.keys())
@@ -131,9 +128,20 @@ for folder in os.listdir(forecast_dir):
         fc_field = fc_sub[var_name]  # 2D
         er_field = er_sub[var_name]  # 2D
 
-        # ★ 只把 radial_spectrum_2d 換成 areaweighted 版本
-        k_fc, spec_fc = radial_spectrum_2d_areaweighted(fc_field, AREA_SUB)
-        k_er, spec_er = radial_spectrum_2d_areaweighted(er_field, AREA_SUB)
+        k_fc, spec_fc = radial_power_spectrum(
+            fc_field,
+            area2d=AREA_SUB,
+            detrend_mean=DETREND_MEAN,
+            amplitude=AMPLITUDE_SPECTRUM,
+            density_norm=DENSITY_NORM,
+        )
+        k_er, spec_er = radial_power_spectrum(
+            er_field,
+            area2d=AREA_SUB,
+            detrend_mean=DETREND_MEAN,
+            amplitude=AMPLITUDE_SPECTRUM,
+            density_norm=DENSITY_NORM,
+        )
 
         spectra_list['forecast'][var_name].append((k_fc, spec_fc))
         spectra_list['era5'][var_name].append((k_er, spec_er))
@@ -187,5 +195,5 @@ for var in variables:
     npz_dict[f'pangu_mean_{var}'] = mean_fc
     npz_dict[f'pangu_std_{var}']  = std_fc
 
-np.savez('all_spectral_data.npz', **npz_dict)
-print('Saved all_spectral_data.npz')
+np.savez('all_energy_data.npz', **npz_dict)
+print('Saved all_energy_data.npz')

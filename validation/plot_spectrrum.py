@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 1. 载入所有频谱数据
-data = np.load('all_spectral_data2024.npz')
+data = np.load('all_energy_data.npz')
 variables = ['z500', 'q700', 't850', 'u850', 'v850']
 
 # 1. 基於波數的平均徑向譜（含 ±1σ，子標題顯示最大 k）
