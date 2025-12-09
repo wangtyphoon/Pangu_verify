@@ -76,7 +76,6 @@ def radial_power_spectrum(
       3) 以像素半徑做徑向平均
     """
     H, W = field2d.shape
-
     if area2d is not None:
         if area2d.shape != (H, W):
             raise ValueError(f"area2d 形狀需為 {(H, W)}，目前是 {area2d.shape}")
@@ -88,7 +87,6 @@ def radial_power_spectrum(
         x = field2d.astype(np.float64, copy=False)
         if detrend_mean:
             x = x - np.nanmean(x)
-
     F = np.fft.fft2(x)
     F = np.fft.fftshift(F)
 
@@ -291,7 +289,7 @@ def main() -> None:
     for lead in lead_keys:
         dump_group(lead, all_specs[lead])
 
-    npz_path = ROOT / "all_energy_multistep.npz"
+    npz_path = ROOT / "all_energy_multistep24.npz"
     np.savez(npz_path, **npz_payload)
     print(f"已輸出 {npz_path.name}（包含 overall 及所有 lead 的 mean/std）")
 

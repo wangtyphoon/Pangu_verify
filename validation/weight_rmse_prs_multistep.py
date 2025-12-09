@@ -59,6 +59,11 @@ def parse_stamp(stamp: str) -> datetime:
     return datetime.strptime(stamp, "%Y-%m-%d-%H-%M")
 
 
+def compute_wind_speed(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """由 u、v 分量計算風速。"""
+    return np.sqrt(np.square(u) + np.square(v))
+
+
 def weighted_mse_dict(forecast_dict, era5_dict, weight):
     sum_w = np.sum(weight)
     mse_per_var = {}
@@ -78,6 +83,13 @@ def forecast_to_dict(forecast_data):
     for name, (ch, lv) in channel_level_map.items():
         fc_dict[name] = forecast_data[ch, lv]
     return fc_dict
+
+
+def add_wind_speed(var_dict):
+    """在 dict 上新增 wind850（需已含 u850/v850）。"""
+    u = np.asarray(var_dict["u850"])
+    v = np.asarray(var_dict["v850"])
+    var_dict["wind850"] = compute_wind_speed(u, v)
 
 
 def evaluate_run(run_dir):
@@ -108,6 +120,8 @@ def evaluate_run(run_dir):
 
         fc_dict = forecast_to_dict(fc_data)
         er_dict = extract_subset(er_data, reference_nc, channel_level_map)
+        add_wind_speed(fc_dict)
+        add_wind_speed(er_dict)
 
         mse_dict, mse_all = weighted_mse_dict(fc_dict, er_dict, weight_2d)
         rmse_dict = {f"{var}_rmse": np.sqrt(mse) for var, mse in mse_dict.items()}
@@ -142,7 +156,7 @@ def main():
     df = pd.DataFrame(all_records).set_index("datetime").sort_index()
 
     # 逐個時間點/樣本的 RMSE
-    out_full = "rmse_multistep_prs.csv"
+    out_full = "rmse_multistep_prs24.csv"
     df.to_csv(out_full, float_format="%.8f", encoding="utf-8-sig")
     print(f"已輸出逐樣本結果：{out_full}")
     # 依 lead_hours 分組平均（缺少 lead 時略過）
@@ -155,7 +169,7 @@ def main():
                 .apply(lambda g: np.sqrt((g ** 2).mean()))
                 .sort_index()
             )
-            out_lead = "rmse_multistep_prs_by_lead.csv"
+            out_lead = "rmse_multistep_prs24_by_lead.csv"
             lead_df.to_csv(out_lead, float_format="%.8f", encoding="utf-8-sig")
             print(f"已輸出依 lead 平均結果：{out_lead}")
 

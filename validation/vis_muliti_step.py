@@ -1,0 +1,210 @@
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+
+from subset import extract_subset
+
+# === 路徑設定（請依實際檔案位置調整）===
+# results 底下的 run 資料夾，內含 output_upper_*.npy
+RUN_DIR = Path(r"../results/2024-10-28-00-00to2024-10-29-00-00")
+# ERA5 真值根目錄
+ERA5_ROOT = Path(r"../forecasts")
+# 含 latitude/longitude 的 upper.nc，用來裁切 192x192 區域
+REFERENCE_NC = ERA5_ROOT / "2020-05-05-00-00" / "upper.nc"
+
+# 需要繪圖的變數（固定 5 個 + 衍生風速）
+BASE_VARS = ("z500", "q700", "t850", "u850", "v850")
+DERIVED_VARS = ("wind850",)  # 由 u850、v850 計算
+VARS = BASE_VARS + DERIVED_VARS
+CHANNEL_LEVEL_MAP = {
+    "z500": (0, 5),
+    "q700": (1, 3),
+    "t850": (2, 2),
+    "u850": (3, 2),
+    "v850": (4, 2),
+}
+
+GRID_SHAPE = (192, 192)
+SHOW_FIGURE = False
+VALUE_CMAP = "viridis"
+ERROR_CMAP = "bwr"
+OUTPUT_DIR = Path("figures")
+
+
+def parse_dt(dt_str: str) -> datetime:
+    return datetime.strptime(dt_str, "%Y-%m-%d-%H-%M")
+
+
+def compute_wind_speed(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """由東西向/南北向風分量計算風速。"""
+    return np.sqrt(np.square(u) + np.square(v))
+
+
+def to_hw(arr: np.ndarray) -> np.ndarray:
+    """確保輸出為 192x192。"""
+    if arr.ndim == 2 and arr.shape == GRID_SHAPE:
+        return arr
+    if arr.ndim == 1 and arr.size == GRID_SHAPE[0] * GRID_SHAPE[1]:
+        return arr.reshape(GRID_SHAPE)
+    if arr.ndim == 2 and (arr.shape[0] == GRID_SHAPE[0] * GRID_SHAPE[1] or arr.shape[1] == GRID_SHAPE[0] * GRID_SHAPE[1]):
+        return arr.reshape(GRID_SHAPE)
+    raise ValueError(f"無法 reshape 到 {GRID_SHAPE}，目前 shape={arr.shape}")
+
+
+def forecast_to_dict(forecast_data: np.ndarray) -> Dict[str, np.ndarray]:
+    """從 (5, 13, 192, 192) 取得各變數 2D 網格。"""
+    fc_dict = {}
+    for name, (ch, lv) in CHANNEL_LEVEL_MAP.items():
+        fc_dict[name] = to_hw(forecast_data[ch, lv])
+    return fc_dict
+
+
+def add_wind_speed(data_dict: Dict[str, np.ndarray]) -> None:
+    """在原始 dict 上增加 wind850 = sqrt(u850^2 + v850^2)。"""
+    u = to_hw(np.asarray(data_dict["u850"]))
+    v = to_hw(np.asarray(data_dict["v850"]))
+    data_dict["wind850"] = compute_wind_speed(u, v)
+
+
+def load_step(forecast_file: Path) -> Tuple[str, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """讀取單一步 (forecast vs ERA5 truth)。"""
+    target_dt = forecast_file.stem[len("output_upper_") :]
+    truth_path = ERA5_ROOT / target_dt / "input_upper.npy"
+    if not truth_path.exists():
+        raise FileNotFoundError(f"找不到 ERA5 真值檔案：{truth_path}")
+
+    fc_data = np.load(forecast_file)
+    tr_data = np.load(truth_path)
+
+    forecast_dict = forecast_to_dict(fc_data)
+    truth_dict = extract_subset(tr_data, str(REFERENCE_NC), CHANNEL_LEVEL_MAP)
+    add_wind_speed(forecast_dict)
+    add_wind_speed(truth_dict)
+
+    return target_dt, forecast_dict, truth_dict
+
+
+def collect_steps() -> List[Tuple[str, Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
+    if not RUN_DIR.exists():
+        raise FileNotFoundError(f"找不到 RUN_DIR：{RUN_DIR}")
+
+    files = sorted(RUN_DIR.glob("output_upper_*.npy"), key=lambda p: parse_dt(p.stem[len("output_upper_") :]))
+    if not files:
+        raise FileNotFoundError(f"{RUN_DIR} 裡沒有 output_upper_*.npy")
+
+    steps = []
+    for f in files:
+        steps.append(load_step(f))
+    return steps
+
+
+def prepare_step_data(steps):
+    prepared = []
+    stats = {var: {"vmin": None, "vmax": None, "err_max": None} for var in VARS}
+
+    for target_dt, forecast, truth in steps:
+        step_entry = {"target": target_dt, "vars": {}}
+        for var in VARS:
+            fc = forecast[var]
+            tr = to_hw(np.asarray(truth[var]))
+            err = fc - tr
+            rmse = float(np.sqrt(np.mean(err ** 2)))
+
+            step_entry["vars"][var] = {"forecast": fc, "truth": tr, "error": err, "rmse": rmse}
+
+            # 色階僅依據 ERA5 真值
+            vmin = float(tr.min())
+            vmax = float(tr.max())
+            err_abs = float(np.abs(err).max())
+
+            var_stats = stats[var]
+            var_stats["vmin"] = vmin if var_stats["vmin"] is None else min(var_stats["vmin"], vmin)
+            var_stats["vmax"] = vmax if var_stats["vmax"] is None else max(var_stats["vmax"], vmax)
+            var_stats["err_max"] = err_abs if var_stats["err_max"] is None else max(var_stats["err_max"], err_abs)
+
+        prepared.append(step_entry)
+
+    return prepared, stats
+
+
+def visualize(prepared, stats):
+    try:
+        import matplotlib
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("需要 matplotlib 才能繪圖，請先安裝（pip install matplotlib）。") from exc
+
+    if not SHOW_FIGURE:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_steps = len(prepared)
+    if n_steps == 0:
+        print("沒有可視化的步驟資料。")
+        return
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    run_name = RUN_DIR.name
+    start_dt = run_name.split("to")[0] if "to" in run_name else run_name
+    final_target = prepared[-1]["target"]
+
+    for var in VARS:
+        fig, axes = plt.subplots(3, n_steps, figsize=(4 * n_steps, 10))
+        axes = np.asarray(axes).reshape(3, n_steps)
+
+        vmin = stats[var]["vmin"]
+        vmax = stats[var]["vmax"]
+        err_max = stats[var]["err_max"] or 1e-9
+        colorbars = [None, None, None]
+
+        for col, step in enumerate(prepared):
+            data = step["vars"][var]
+            fc = data["forecast"]
+            tr = data["truth"]
+            err = data["error"]
+
+            im_fc = axes[0, col].imshow(fc, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
+            im_tr = axes[1, col].imshow(tr, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
+            im_er = axes[2, col].imshow(err, cmap=ERROR_CMAP, vmin=-err_max, vmax=err_max)
+
+            colorbars[0] = im_fc
+            colorbars[1] = im_tr
+            colorbars[2] = im_er
+
+            axes[0, col].set_title(f"{step['target']} Forecast")
+            axes[1, col].set_title(f"{step['target']} Truth")
+            axes[2, col].set_title(f"{step['target']} Error (RMSE={data['rmse']:.4f})")
+
+            for row in range(3):
+                axes[row, col].set_xticks([])
+                axes[row, col].set_yticks([])
+
+        fig.suptitle(f"{run_name} — {var} multi-step 預報", fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        labels = ["Forecast / Truth scale", "Forecast / Truth scale", "Error scale"]
+        for row, im in enumerate(colorbars):
+            if im is None:
+                continue
+            cbar = fig.colorbar(im, ax=axes[row, :].ravel().tolist(), shrink=0.8, pad=0.02)
+            cbar.ax.set_ylabel(labels[row], rotation=270, labelpad=12)
+
+        out_path = OUTPUT_DIR / f"{start_dt}_to_{final_target}_{var}_multistep.png"
+        fig.savefig(out_path, dpi=150)
+        print(f"已輸出 {var} 圖片：{out_path}")
+
+        if SHOW_FIGURE:
+            plt.show()
+        plt.close(fig)
+
+
+def main():
+    steps = collect_steps()
+    prepared, stats = prepare_step_data(steps)
+    visualize(prepared, stats)
+
+
+if __name__ == "__main__":
+    main()

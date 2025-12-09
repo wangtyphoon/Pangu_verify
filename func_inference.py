@@ -189,7 +189,7 @@ def filename_to_datetime(fn: str) -> datetime:
     # fn 範例: "1980031500.npz" -> 取前 10 碼 "1980031500"
     return datetime.strptime(fn[:10], "%Y%m%d%H")
 df['date_time'] = df['filename'].apply(filename_to_datetime)
-fourcast_steps = 2  # Define the number of steps for fourcast
+fourcast_steps = 4  # Define the number of steps for fourcast
 mask2024 = (
     (df['date_time'].dt.year == 2024) &
     (df['asc_steps']  >= 1) &
@@ -207,7 +207,7 @@ model_paths = {
 for dt in df2024['date_time']:
     run_pangu_inference(
         start_time=dt,
-        end_time=dt + timedelta(hours=12),
+        end_time=dt + timedelta(hours=24),
         model_paths=model_paths,
         base_dir=r"C:\Users\王子祐\Documents\Pangu-Weather-ReadyToGo",  # 或其它根目錄
         use_gpu=True,

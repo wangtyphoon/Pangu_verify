@@ -16,11 +16,13 @@ import numpy as np
 
 
 VARIABLES = ["z500", "q700", "t850", "u850", "v850"]
-DATA_FILE = Path(__file__).with_name("all_energy_multistep.npz")
+DATA_FILE = Path(__file__).with_name("all_energy_multistep24.npz")
 LAT_PATH = Path(__file__).resolve().parent.parent / "lat.npy"
 LON_PATH = Path(__file__).resolve().parent.parent / "lon.npy"
 R = 6371.0  # km
 EPS = 1e-12
+# 若要裁掉高波數噪聲，設定波數上限；None 表示不裁切
+K_CUTOFF = 56
 
 
 def cell_area_equal_area(lat2d: np.ndarray, lon2d: np.ndarray) -> np.ndarray:
@@ -94,18 +96,19 @@ def format_suffix(sfx: str) -> str:
 def plot_ratio_wavenumber(npz_obj, suffixes: list[str], k: np.ndarray) -> None:
     plt.figure(figsize=(20, 4))
     lead_suffixes = suffixes  # include overall first (already ordered)
+    mask_k = (k <= K_CUTOFF) if K_CUTOFF is not None else slice(None)
     for idx, var in enumerate(VARIABLES, 1):
-        mean_er = npz_obj[f"era5_mean_{var}_overall"]
-        std_er = npz_obj[f"era5_std_{var}_overall"]
+        mean_er = npz_obj[f"era5_mean_{var}_overall"][mask_k]
+        std_er = npz_obj[f"era5_std_{var}_overall"][mask_k]
 
         ax = plt.subplot(1, len(VARIABLES), idx)
         for sfx in lead_suffixes:
-            mean_fc = npz_obj[f"pangu_mean_{var}_{sfx}"]
-            std_fc = npz_obj[f"pangu_std_{var}_{sfx}"]
+            mean_fc = npz_obj[f"pangu_mean_{var}_{sfx}"][mask_k]
+            std_fc = npz_obj[f"pangu_std_{var}_{sfx}"][mask_k]
             ratio, s_ratio = compute_ratio(mean_er, std_er, mean_fc, std_fc)
 
             label = format_suffix(sfx)
-            ax.plot(k, ratio, label=label)
+            ax.plot(k[mask_k], ratio, label=label)
             # ax.fill_between(k, ratio - s_ratio, ratio + s_ratio, alpha=0.15)
 
         ax.axhline(1.0, linestyle=":", linewidth=1, color="gray")
@@ -125,7 +128,9 @@ def plot_ratio_wavelength(npz_obj, suffixes: list[str], k: np.ndarray, L_eff: fl
     plt.figure(figsize=(20, 4))
     lead_suffixes = suffixes
 
-    mask_k = k > 0
+    mask_k = (k > 0)
+    if K_CUTOFF is not None:
+        mask_k &= (k <= K_CUTOFF)
     lam_base = L_eff / k[mask_k]
 
     for idx, var in enumerate(VARIABLES, 1):
@@ -146,6 +151,7 @@ def plot_ratio_wavelength(npz_obj, suffixes: list[str], k: np.ndarray, L_eff: fl
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_ylim(1e-1, 1e1)
+        ax.set_xlim(lam_base.min(), lam_base.max())
         ax.invert_xaxis()
         ax.set_xlabel("Wavelength λ (km)")
         ax.set_ylabel("Power Ratio (Pangu/ERA5)")
@@ -160,18 +166,30 @@ def main() -> None:
     npz_obj = np.load(DATA_FILE)
     k = npz_obj["k"]
 
-    lat = np.load(LAT_PATH)
-    lon = np.load(LON_PATH)
-    if lat.ndim == 1 and lon.ndim == 1:
-        lat, lon = np.meshgrid(lat, lon, indexing="ij")
-    s_eff = effective_grid_km_equal_area(lat, lon)
-    H_sub, W_sub = lat.shape
-    L_eff = s_eff * min(H_sub, W_sub)
+    # ---- L_eff 計算邏輯對齊 spec_ratio.py ----
+    try:
+        lat = np.load(LAT_PATH)
+        lon = np.load(LON_PATH)
 
-    suffixes = discover_suffixes(npz_obj)
-    suffixes = ['lead06', 'lead12']
-   
+        # 和 spec_ratio.py 一樣：若是 1D lat/lon 則轉成 2D 網格
+        if lat.ndim == 1 and lon.ndim == 1:
+            lat, lon = np.meshgrid(lat, lon, indexing="ij")
 
+        s_eff = effective_grid_km_equal_area(lat, lon)
+        H_sub, W_sub = lat.shape
+        L_eff = s_eff * min(H_sub, W_sub)
+    except FileNotFoundError:
+        # fallback 也對齊 spec_ratio.py
+        L_eff = 192 * 28.0
+        print(f"[Info] LAT/LON not found, using fallback L_eff={L_eff:.1f} km")
+
+    # ---- lead suffix 的選擇 ----
+    # 原本有 discover_suffixes(npz_obj)，但你現在手動鎖成 lead24
+    # 如果想要自動偵測，再加回 discover_suffixes(npz_obj) 即可
+    # suffixes = discover_suffixes(npz_obj)
+    suffixes = ['lead24']  # 保留你目前的設定
+
+    # ---- 繪圖：k-domain & λ-domain ----
     plot_ratio_wavenumber(npz_obj, suffixes, k)
     plot_ratio_wavelength(npz_obj, suffixes, k, L_eff)
 
