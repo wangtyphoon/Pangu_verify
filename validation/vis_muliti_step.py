@@ -30,6 +30,7 @@ GRID_SHAPE = (192, 192)
 SHOW_FIGURE = False
 VALUE_CMAP = "viridis"
 ERROR_CMAP = "bwr"
+LOSS_CMAP = "magma"
 OUTPUT_DIR = Path("figures")
 
 
@@ -102,7 +103,7 @@ def collect_steps() -> List[Tuple[str, Dict[str, np.ndarray], Dict[str, np.ndarr
 
 def prepare_step_data(steps):
     prepared = []
-    stats = {var: {"vmin": None, "vmax": None, "err_max": None} for var in VARS}
+    stats = {var: {"vmin": None, "vmax": None, "loss_max": None, "bias_max": None} for var in VARS}
 
     for target_dt, forecast, truth in steps:
         step_entry = {"target": target_dt, "vars": {}}
@@ -110,19 +111,31 @@ def prepare_step_data(steps):
             fc = forecast[var]
             tr = to_hw(np.asarray(truth[var]))
             err = fc - tr
-            rmse = float(np.sqrt(np.mean(err ** 2)))
+            loss = np.square(err)
+            mse = float(loss.mean())
+            bias_value = float(err.mean())
 
-            step_entry["vars"][var] = {"forecast": fc, "truth": tr, "error": err, "rmse": rmse}
+            step_entry["vars"][var] = {
+                "forecast": fc,
+                "truth": tr,
+                "error": err,
+                "loss": loss,
+                "mse": mse,
+                "bias": bias_value,
+            }
 
             # 色階僅依據 ERA5 真值
             vmin = float(tr.min())
             vmax = float(tr.max())
+            loss_max = float(loss.max())
             err_abs = float(np.abs(err).max())
 
             var_stats = stats[var]
             var_stats["vmin"] = vmin if var_stats["vmin"] is None else min(var_stats["vmin"], vmin)
             var_stats["vmax"] = vmax if var_stats["vmax"] is None else max(var_stats["vmax"], vmax)
-            var_stats["err_max"] = err_abs if var_stats["err_max"] is None else max(var_stats["err_max"], err_abs)
+            var_stats["loss_max"] = loss_max if var_stats["loss_max"] is None else max(var_stats["loss_max"], loss_max)
+            bias_abs = float(np.abs(err).max())  # spatial bias map shares range with error
+            var_stats["bias_max"] = bias_abs if var_stats["bias_max"] is None else max(var_stats["bias_max"], bias_abs)
 
         prepared.append(step_entry)
 
@@ -151,40 +164,47 @@ def visualize(prepared, stats):
     final_target = prepared[-1]["target"]
 
     for var in VARS:
-        fig, axes = plt.subplots(3, n_steps, figsize=(4 * n_steps, 10))
-        axes = np.asarray(axes).reshape(3, n_steps)
+        fig, axes = plt.subplots(4, n_steps, figsize=(4 * n_steps, 13))
+        axes = np.asarray(axes).reshape(4, n_steps)
 
         vmin = stats[var]["vmin"]
         vmax = stats[var]["vmax"]
-        err_max = stats[var]["err_max"] or 1e-9
-        colorbars = [None, None, None]
+        loss_max = stats[var]["loss_max"] or 1e-9
+        bias_max = stats[var]["bias_max"] or 1e-9
+        colorbars = [None, None, None, None]
 
         for col, step in enumerate(prepared):
             data = step["vars"][var]
             fc = data["forecast"]
             tr = data["truth"]
             err = data["error"]
+            loss = data["loss"]
+            bias_val = data["bias"]
 
             im_fc = axes[0, col].imshow(fc, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
             im_tr = axes[1, col].imshow(tr, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
-            im_er = axes[2, col].imshow(err, cmap=ERROR_CMAP, vmin=-err_max, vmax=err_max)
+            # Bias panel shows spatial bias (forecast - truth) with title indicating mean bias.
+            im_bias = axes[2, col].imshow(err, cmap="coolwarm", vmin=-bias_max, vmax=bias_max)
+            im_loss = axes[3, col].imshow(loss, cmap=LOSS_CMAP, vmin=0, vmax=loss_max)
 
             colorbars[0] = im_fc
             colorbars[1] = im_tr
-            colorbars[2] = im_er
+            colorbars[2] = im_bias
+            colorbars[3] = im_loss
 
             axes[0, col].set_title(f"{step['target']} Forecast")
             axes[1, col].set_title(f"{step['target']} Truth")
-            axes[2, col].set_title(f"{step['target']} Error (RMSE={data['rmse']:.4f})")
+            axes[2, col].set_title(f"{step['target']} Bias (mean={bias_val:.4f})")
+            axes[3, col].set_title(f"{step['target']} MSE map (MSE={data['mse']:.4f})")
 
-            for row in range(3):
+            for row in range(4):
                 axes[row, col].set_xticks([])
                 axes[row, col].set_yticks([])
 
         fig.suptitle(f"{run_name} — {var} multi-step 預報", fontsize=14)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.tight_layout(rect=[0, 0, 1, 0.965])
 
-        labels = ["Forecast / Truth scale", "Forecast / Truth scale", "Error scale"]
+        labels = ["Value scale", "Value scale", "Bias scale", "MSE scale"]
         for row, im in enumerate(colorbars):
             if im is None:
                 continue
