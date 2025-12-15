@@ -156,7 +156,7 @@ def main():
     df = pd.DataFrame(all_records).set_index("datetime").sort_index()
 
     # 逐個時間點/樣本的 RMSE
-    out_full = "rmse_multistep_prs24.csv"
+    out_full = "rmse_multistep_prs72.csv"
     df.to_csv(out_full, float_format="%.8f", encoding="utf-8-sig")
     print(f"已輸出逐樣本結果：{out_full}")
     # 依 lead_hours 分組平均（缺少 lead 時略過）
@@ -169,7 +169,7 @@ def main():
                 .apply(lambda g: np.sqrt((g ** 2).mean()))
                 .sort_index()
             )
-            out_lead = "rmse_multistep_prs24_by_lead.csv"
+            out_lead = "rmse_multistep_prs72_by_lead.csv"
             lead_df.to_csv(out_lead, float_format="%.8f", encoding="utf-8-sig")
             print(f"已輸出依 lead 平均結果：{out_lead}")
 

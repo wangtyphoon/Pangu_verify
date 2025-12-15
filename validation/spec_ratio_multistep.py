@@ -16,7 +16,7 @@ import numpy as np
 
 
 VARIABLES = ["z500", "q700", "t850", "u850", "v850"]
-DATA_FILE = Path(__file__).with_name("all_energy_multistep24.npz")
+DATA_FILE = Path(__file__).with_name("all_energy_multistep72.npz")
 LAT_PATH = Path(__file__).resolve().parent.parent / "lat.npy"
 LON_PATH = Path(__file__).resolve().parent.parent / "lon.npy"
 R = 6371.0  # km
@@ -186,8 +186,10 @@ def main() -> None:
     # ---- lead suffix 的選擇 ----
     # 原本有 discover_suffixes(npz_obj)，但你現在手動鎖成 lead24
     # 如果想要自動偵測，再加回 discover_suffixes(npz_obj) 即可
-    # suffixes = discover_suffixes(npz_obj)
-    suffixes = ['lead24']  # 保留你目前的設定
+    # suffixes = discover_suffixes(npz_obj)[
+    #lead 6-72
+    suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48','lead54','lead60','lead66','lead72']
+   # suffixes = ['lead24','lead30']  # 保留你目前的設定
 
     # ---- 繪圖：k-domain & λ-domain ----
     plot_ratio_wavenumber(npz_obj, suffixes, k)

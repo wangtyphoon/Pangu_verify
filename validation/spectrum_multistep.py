@@ -282,14 +282,14 @@ def main() -> None:
     if overall_specs is not None:
         dump_group(None, overall_specs)
     else:
-        print("警告：找不到 overall (None) 分組，略過 overall。")
+        print("警告：找不到 overall (None) 分組，略過 overall。") 
 
     # 再輸出每一個實際出現的 lead
     lead_keys = sorted(k for k in all_specs.keys() if k is not None)
     for lead in lead_keys:
         dump_group(lead, all_specs[lead])
 
-    npz_path = ROOT / "all_energy_multistep24.npz"
+    npz_path = ROOT / "all_energy_multistep72.npz"
     np.savez(npz_path, **npz_payload)
     print(f"已輸出 {npz_path.name}（包含 overall 及所有 lead 的 mean/std）")
 

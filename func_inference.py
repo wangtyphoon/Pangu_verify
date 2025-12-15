@@ -57,7 +57,9 @@ def run_pangu_inference(
     lat_range=(0.0, 47.75),
     lon_range=(102.25, 150.0),
     reference_nc: str = "upper.nc",
-    overwrite: bool = False
+    overwrite: bool = False,
+    save_every_hours: int = 6,
+    direct_hours: tuple[int, ...] = (24, 48, 72),
 ) -> None:
     """
     Run Pangu-Weather ONNX inference from start_time to end_time.
@@ -65,6 +67,10 @@ def run_pangu_inference(
     每次往前推最大的 interval，直到 current_time >= end_time。若 crop_region=True，
     會依照 validation/subset.py 的預設範圍 (lat_range/lon_range) 只儲存子域資料，
     以降低磁碟用量；推理鏈仍在記憶體中使用全域格點資料。
+
+    save_every_hours: 連鎖推理時的存檔間隔（例如 6 小時）；若為 0/None 則只在末端存檔。
+    direct_hours: 多個「直推」小時數；若該小時數 <= 預報長度且在 model_paths 中存在，
+                  則會直接用對應模型跑一次，並以直推輸出作為後續延伸的起點。
     """
     # 1) 設定目錄
     if base_dir is None:
@@ -99,63 +105,143 @@ def run_pangu_inference(
         #     crop_region = False
 
     # 2) 初始化
+    total_hours = int((end_time - start_time).total_seconds() // 3600)
+    if total_hours <= 0:
+        print(f"[INFO] end_time 不大於 start_time，跳過：{start_time} -> {end_time}")
+        return
+
+    direct_hours_sorted = sorted(
+        h for h in direct_hours
+        if h is not None and h > 0 and h <= total_hours
+    )
+
+    init_upper = np.load(os.path.join(forecasts_dir, 'input_upper.npy')).astype(np.float32)
+    init_surface = np.load(os.path.join(forecasts_dir, 'input_surface.npy')).astype(np.float32)
+
+    session_cache: dict[str, ort.InferenceSession] = {}
+
+    def _ensure_session(model_file: str) -> ort.InferenceSession:
+        if model_file in session_cache:
+            return session_cache[model_file]
+        sess_opts = ort.SessionOptions()
+        sess_opts.enable_cpu_mem_arena = False
+        sess_opts.enable_mem_pattern = False
+        sess_opts.enable_mem_reuse = False
+        sess_opts.intra_op_num_threads = intra_threads
+
+        providers = ['CPUExecutionProvider']
+        if use_gpu:
+            cuda_opts = {'arena_extend_strategy': 'kSameAsRequested'}
+            providers = [('CUDAExecutionProvider', cuda_opts)]
+
+        ort_sess = ort.InferenceSession(model_file, sess_options=sess_opts, providers=providers)
+        session_cache[model_file] = ort_sess
+        return ort_sess
+
+    def _run_chain_step(target_time: datetime, current_time: datetime, upper, surface):
+        out_u = out_s = None
+        while current_time < target_time:
+            remaining_hours = (target_time - current_time).total_seconds() / 3600
+            for interval in sorted(model_paths.keys(), reverse=True):
+                if interval <= remaining_hours:
+                    break
+            model_file = model_paths[interval]
+            print(f"[{current_time}] → +{interval}h  使用模型：{os.path.basename(model_file)}")
+            ort_session = _ensure_session(model_file)
+            out_u, out_s = ort_session.run(None, {'input': upper, 'input_surface': surface})
+            upper = out_u.astype(np.float32)
+            surface = out_s.astype(np.float32)
+            current_time += timedelta(hours=interval)
+        return out_u, out_s, upper, surface, current_time
+
+    upper = init_upper.copy()
+    surface = init_surface.copy()
     current_time = start_time
-    last_model = None
-    ort_session = None
-    is_first = True
-    upper = None
-    surface = None
+    saved_times: set[str] = set()
+    segment_base_upper = init_upper.copy()
+    segment_base_surface = init_surface.copy()
+    last_direct_hour = 0
 
-    # 3) 主迴圈：每次向前推階段
-    while current_time < end_time:
-        remaining_hours = (end_time - current_time).total_seconds() / 3600
-
-        # 選擇最大的 interval
-        for interval in sorted(model_paths.keys(), reverse=True):
-            if remaining_hours >= interval:
-                break
-        model_file = model_paths[interval]
-        print(f"[{current_time}] → +{interval}h  使用模型：{os.path.basename(model_file)}")
-
-        # 4) 若模型換了，重建 ONNX session
-        if model_file != last_model:
-            sess_opts = ort.SessionOptions()
-            sess_opts.enable_cpu_mem_arena = False
-            sess_opts.enable_mem_pattern = False
-            sess_opts.enable_mem_reuse = False
-            sess_opts.intra_op_num_threads = intra_threads
-
-            providers = ['CPUExecutionProvider']
-            if use_gpu:
-                cuda_opts = {'arena_extend_strategy':'kSameAsRequested'}
-                providers = [('CUDAExecutionProvider', cuda_opts)]
-
-            ort_session = ort.InferenceSession(model_file, sess_options=sess_opts, providers=providers)
-            last_model = model_file
-
-        # 5) 載入輸入
-        if is_first:
-            upper = np.load(os.path.join(forecasts_dir, 'input_upper.npy')).astype(np.float32)
-            surface = np.load(os.path.join(forecasts_dir, 'input_surface.npy')).astype(np.float32)
-            is_first = False
-
-        # 6) 推斷 + 存檔
-        outputs = ort_session.run(None, {'input': upper, 'input_surface': surface})
-        out_upper, out_surface = outputs
-        upper = out_upper.astype(np.float32)
-        surface = out_surface.astype(np.float32)
-
-        # 7) 更新時間，再存成新的檔名
-        current_time += timedelta(hours=interval)
-        stamp = current_time.strftime("%Y-%m-%d-%H-%M")
-        upper_to_save = out_upper
-        surface_to_save = out_surface
+    def _save_output(ts: datetime, out_u, out_s):
+        stamp = ts.strftime("%Y-%m-%d-%H-%M")
+        if stamp in saved_times:
+            return
+        upper_to_save = out_u
+        surface_to_save = out_s
         if crop_region and region_selector is not None:
             lat_sl, lon_sl = region_selector
-            upper_to_save = out_upper[:, :, lat_sl, lon_sl]
-            surface_to_save = out_surface[:, lat_sl, lon_sl]
+            upper_to_save = out_u[:, :, lat_sl, lon_sl]
+            surface_to_save = out_s[:, lat_sl, lon_sl]
         np.save(os.path.join(results_dir, f'output_upper_{stamp}.npy'), upper_to_save)
         np.save(os.path.join(results_dir, f'output_surface_{stamp}.npy'), surface_to_save)
+        saved_times.add(stamp)
+
+    def _iter_checkpoints(start_h: int, end_h: int):
+        if not save_every_hours:
+            return []
+        h = start_h + save_every_hours
+        checkpoints = []
+        while h < end_h:
+            checkpoints.append(start_time + timedelta(hours=h))
+            h += save_every_hours
+        return checkpoints
+
+    # 3) 逐段處理：每段的起點是上一個直推輸出（第一段是初始輸入）
+    for direct_h in direct_hours_sorted:
+        target_time = start_time + timedelta(hours=direct_h)
+
+        # 先處理直推前的 checkpoint（例如 6/12/18）
+        for ck_time in _iter_checkpoints(last_direct_hour, direct_h):
+            out_upper, out_surface, upper, surface, current_time = _run_chain_step(
+                ck_time, current_time, upper, surface
+            )
+            if out_upper is not None and out_surface is not None:
+                _save_output(ck_time, out_upper, out_surface)
+
+        # 直推本身（interval = 本段長度）
+        interval = direct_h - last_direct_hour
+        if interval in model_paths:
+            model_file = model_paths[interval]
+            print(f"[DIRECT] {start_time} → +{interval}h  使用模型：{os.path.basename(model_file)}")
+            ort_session = _ensure_session(model_file)
+            direct_upper, direct_surface = ort_session.run(
+                None, {'input': segment_base_upper, 'input_surface': segment_base_surface}
+            )
+            _save_output(target_time, direct_upper, direct_surface)
+
+            # 更新段起點與當前狀態，以直推結果為基準繼續往後
+            segment_base_upper = direct_upper.astype(np.float32)
+            segment_base_surface = direct_surface.astype(np.float32)
+            upper = segment_base_upper.copy()
+            surface = segment_base_surface.copy()
+            current_time = target_time
+        else:
+            # 若沒有對應直推模型，改為鏈式跑到該時間點
+            out_upper, out_surface, upper, surface, current_time = _run_chain_step(
+                target_time, current_time, upper, surface
+            )
+            if out_upper is not None and out_surface is not None:
+                _save_output(target_time, out_upper, out_surface)
+                segment_base_upper = upper.copy()
+                segment_base_surface = surface.copy()
+
+        last_direct_hour = direct_h
+
+    # 4) 最後一段：直推之後的延伸（包含末端輸出）
+    if last_direct_hour < total_hours:
+        for ck_time in _iter_checkpoints(last_direct_hour, total_hours):
+            out_upper, out_surface, upper, surface, current_time = _run_chain_step(
+                ck_time, current_time, upper, surface
+            )
+            if out_upper is not None and out_surface is not None:
+                _save_output(ck_time, out_upper, out_surface)
+
+        # 末端
+        out_upper, out_surface, upper, surface, current_time = _run_chain_step(
+            end_time, current_time, upper, surface
+        )
+        if out_upper is not None and out_surface is not None:
+            _save_output(end_time, out_upper, out_surface)
 
     print("Inference complete.")
 
@@ -189,7 +275,7 @@ def filename_to_datetime(fn: str) -> datetime:
     # fn 範例: "1980031500.npz" -> 取前 10 碼 "1980031500"
     return datetime.strptime(fn[:10], "%Y%m%d%H")
 df['date_time'] = df['filename'].apply(filename_to_datetime)
-fourcast_steps = 4  # Define the number of steps for fourcast
+fourcast_steps = 12  # Define the number of steps for fourcast
 mask2024 = (
     (df['date_time'].dt.year == 2024) &
     (df['asc_steps']  >= 1) &
@@ -207,10 +293,12 @@ model_paths = {
 for dt in df2024['date_time']:
     run_pangu_inference(
         start_time=dt,
-        end_time=dt + timedelta(hours=24),
+        end_time=dt + timedelta(hours=72),
         model_paths=model_paths,
         base_dir=r"C:\Users\王子祐\Documents\Pangu-Weather-ReadyToGo",  # 或其它根目錄
         use_gpu=True,
-        overwrite=True
+        overwrite=False,
+        save_every_hours=6,
+        direct_hours=(24, 48, 72),
     )
     # break
