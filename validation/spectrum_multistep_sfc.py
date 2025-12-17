@@ -1,17 +1,16 @@
 """
-多 step 預報的徑向頻譜分析。
-流程參考目前的 spectrum.py，並加入依 lead_hours 分組的統計，
-實作與 spectrum_all_stat 的分步統計概念相似。
+多 step 地表層預報的徑向頻譜分析。
+流程參考 spectrum_multistep_prs.py，通道與資料來源則依 weight_rmse_sfc_multistep.py。
 
 輸入：
-    - ../results/<run>/output_upper_YYYY-MM-DD-HH-MM.npy
-    - ../forecasts/YYY.../input_upper.npy
-    - 需要 ../upper.nc、../lat.npy、../lon.npy
+    - ../results/<run>/output_surface_YYYY-MM-DD-HH-MM.npy
+    - ../forecasts/YYY.../input_surface.npy
+    - 需要 ../surface.nc、../lat.npy、../lon.npy
 
 輸出（皆在 validation/ 下）：
     - overall: {var}_spectral_stats_overall.csv
     - 每個 lead: {var}_spectral_stats_leadXX.csv（XX=小時）
-    - all_energy_multistep.npz：包含 k 及每個 var 的 mean/std（overall 與各 lead）
+    - all_energy_multistep_sfc72.npz：包含 k 及每個 var 的 mean/std（overall 與各 lead）
 """
 
 from datetime import datetime
@@ -21,20 +20,14 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from subset import extract_subset
+from subset import extract_subset_surface
 
-# ---------------- 基本設定（與現有 spectrum.py 保持一致，可依需求調整） ----------------
-z500_channel = 0
-q700_channel = 1
-t850_channel = 2
-u850_channel = 3
-v850_channel = 4
-channel_level_map = {
-    "z500": (z500_channel, 5),
-    "q700": (q700_channel, 3),
-    "t850": (t850_channel, 2),
-    "u850": (u850_channel, 2),
-    "v850": (v850_channel, 2),
+# ---------------- 基本設定 ----------------
+channel_map_surface = {
+    "msl": 0,
+    "u10": 1,
+    "v10": 2,
+    "t2m": 3,
 }
 
 LAT_RANGE = (2.25, 45.50)
@@ -49,7 +42,8 @@ ROOT = Path(__file__).resolve().parent
 BASE = ROOT.parent
 RESULTS_ROOT = BASE / "results"
 ERA5_ROOT = BASE / "forecasts"
-NC_PATH = "..//upper.nc"
+SURFACE_NC_PATH = "../surface.nc"
+
 
 # ---------------- 面積權重工具 ----------------
 def select_bbox_indices(lat2d: np.ndarray, lon2d: np.ndarray, lat_range, lon_range):
@@ -111,18 +105,6 @@ def radial_power_spectrum(
     k = np.arange(kmax)
     return k, spec
 
-def forecast_to_dict(forecast_data):
-    """
-    直接從已裁切的推理輸出取得各變數 2D 權重網格。
-    forecast_data 形狀預期為 (5, 13, 192, 192)
-    """
-
-    #從192*192裁減到 174*174
-    fc_dict = {}
-    for name, (ch, lv) in channel_level_map.items():
-        fc_dict[name] = forecast_data[ch, lv, 9:183, 9:183]
-    return fc_dict
-
 
 # --------- 一次性載入經緯度，對應子區面積權重 ---------
 LAT_ALL = np.load(BASE / "lat.npy")
@@ -133,9 +115,43 @@ ys, xs = select_bbox_indices(LAT_ALL, LON_ALL, LAT_RANGE, LON_RANGE)
 LAT_SUB = LAT_ALL[ys, xs].copy()
 AREA_SUB = np.cos(np.deg2rad(LAT_SUB)) if APPLY_LAT_WEIGHT else None
 
+
 # ---------------- helper ----------------
 def parse_stamp(stamp: str) -> datetime:
     return datetime.strptime(stamp, "%Y-%m-%d-%H-%M")
+
+
+def surface_to_dict(data: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    將 surface 輸出轉為 dict 並裁切到目標經緯度範圍。
+    若形狀無法直接判定，回退到 extract_subset_surface。
+    """
+    H_full, W_full = LAT_ALL.shape
+    sub_shape = LAT_SUB.shape
+
+    if data.ndim == 3:
+        if data.shape[0] == len(channel_map_surface):
+            if data.shape[1:] == sub_shape:
+                return {name: np.asarray(data[ch], dtype=np.float64) for name, ch in channel_map_surface.items()}
+            if data.shape[1:] == (H_full, W_full):
+                return {
+                    name: np.asarray(data[ch, ys, xs], dtype=np.float64) for name, ch in channel_map_surface.items()
+                }
+        if data.shape[-1] == len(channel_map_surface):
+            if data.shape[:2] == sub_shape:
+                return {name: np.asarray(data[:, :, ch], dtype=np.float64) for name, ch in channel_map_surface.items()}
+            if data.shape[:2] == (H_full, W_full):
+                return {
+                    name: np.asarray(data[ys, xs, ch], dtype=np.float64) for name, ch in channel_map_surface.items()
+                }
+
+    return extract_subset_surface(
+        data,
+        str(SURFACE_NC_PATH),
+        channel_map_surface,
+        lat_range=LAT_RANGE,
+        lon_range=LON_RANGE,
+    )
 
 
 def compute_stats(spec_list: List[Tuple[np.ndarray, np.ndarray]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -154,7 +170,10 @@ def add_record(store: Dict, lead: int | None, source: str, var: str, k: np.ndarr
     將頻譜結果存入指定分組。
     store 的層級：lead -> source -> var -> list[(k, spec)]
     """
-    grp = store.setdefault(lead, {"forecast": {v: [] for v in channel_level_map}, "era5": {v: [] for v in channel_level_map}})
+    grp = store.setdefault(
+        lead,
+        {"forecast": {v: [] for v in channel_map_surface}, "era5": {v: [] for v in channel_map_surface}},
+    )
     grp[source][var].append((k, spec))
 
 
@@ -178,10 +197,10 @@ def main() -> None:
         print(f"處理 {run_name} ...")
         for fn in sorted(run_folder.iterdir()):
             name = fn.name
-            if not (name.startswith("output_upper_") and name.endswith(".npy")):
+            if not (name.startswith("output_surface_") and name.endswith(".npy")):
                 continue
-            dt_str = name[len("output_upper_") : -4]
-            era_path = ERA5_ROOT / dt_str / "input_upper.npy"
+            dt_str = name[len("output_surface_") : -4]
+            era_path = ERA5_ROOT / dt_str / "input_surface.npy"
             if not era_path.exists():
                 print(f"[WARN] 缺少 ERA5 {era_path}, 跳過 {dt_str}")
                 continue
@@ -189,18 +208,12 @@ def main() -> None:
             fc_data = np.load(fn)
             er_data = np.load(era_path)
 
-            fc_sub = forecast_to_dict(fc_data)
-            er_sub = extract_subset(
-                er_data,
-                str(NC_PATH),
-                channel_level_map,
-                lat_range=LAT_RANGE,
-                lon_range=LON_RANGE,
-            )
+            fc_sub = surface_to_dict(fc_data)
+            er_sub = surface_to_dict(er_data)
 
             lead_hours = int((parse_stamp(dt_str) - run_start).total_seconds() // 3600)
 
-            for var in channel_level_map:
+            for var in channel_map_surface:
                 fc_field = fc_sub[var]
                 er_field = er_sub[var]
 
@@ -236,7 +249,7 @@ def main() -> None:
     def dump_group(lead_key: int | None, specs: Dict) -> None:
         nonlocal k_ref
         suffix = "overall" if lead_key is None else f"lead{int(lead_key):02d}"
-        for var in channel_level_map:
+        for var in channel_map_surface:
             fc_list = specs["forecast"][var]
             er_list = specs["era5"][var]
             if not fc_list or not er_list:
@@ -269,7 +282,7 @@ def main() -> None:
                 }
             )
             out_csv = ROOT / f"{var}_spectral_stats_{suffix}.csv"
-            df.to_csv(out_csv, index=False)
+            # df.to_csv(out_csv, index=False)
             print(f"已輸出 {out_csv.name}")
 
             npz_payload[f"era5_mean_{var}_{suffix}"] = mean_er
@@ -282,14 +295,14 @@ def main() -> None:
     if overall_specs is not None:
         dump_group(None, overall_specs)
     else:
-        print("警告：找不到 overall (None) 分組，略過 overall。") 
+        print("警告：找不到 overall (None) 分組，略過 overall。")
 
     # 再輸出每一個實際出現的 lead
     lead_keys = sorted(k for k in all_specs.keys() if k is not None)
     for lead in lead_keys:
         dump_group(lead, all_specs[lead])
 
-    npz_path = ROOT / "all_energy_multistep72.npz"
+    npz_path = ROOT / "all_energy_multistep_sfc72.npz"
     np.savez(npz_path, **npz_payload)
     print(f"已輸出 {npz_path.name}（包含 overall 及所有 lead 的 mean/std）")
 
