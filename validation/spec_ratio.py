@@ -55,10 +55,10 @@ for i, var in enumerate(variables, 1):
     A_f     = data[f'pangu_mean_{var}']
     sA_f    = data[f'pangu_std_{var}']
 
-    P_e  = np.clip(A_e, eps, None)**2
-    P_f  = np.clip(A_f, eps, None)**2
-    sP_e = 2*np.clip(A_e, eps, None)*np.clip(sA_e, 0, None)
-    sP_f = 2*np.clip(A_f, eps, None)*np.clip(sA_f, 0, None)
+    P_e  = np.clip(A_e, eps, None)
+    P_f  = np.clip(A_f, eps, None)
+    sP_e = np.clip(sA_e, 0, None)
+    sP_f = np.clip(sA_f, 0, None)
 
     R    = np.clip(P_f/(P_e + eps), eps, None)
     rel_e = np.clip(sP_e/(P_e + eps), 0, None)
@@ -95,10 +95,10 @@ for i, var in enumerate(variables, 1):
     mask = k > 0
     lam  = L_eff / k[mask]
 
-    P_e  = np.clip(A_e[mask], eps, None)**2
-    P_f  = np.clip(A_f[mask], eps, None)**2
-    sP_e = 2*np.clip(A_e[mask], eps, None)*np.clip(sA_e[mask], 0, None)
-    sP_f = 2*np.clip(A_f[mask], eps, None)*np.clip(sA_f[mask], 0, None)
+    P_e  = np.clip(A_e[mask], eps, None)
+    P_f  = np.clip(A_f[mask], eps, None)
+    sP_e = np.clip(sA_e[mask], 0, None)
+    sP_f = np.clip(sA_f[mask], 0, None)
 
     R    = np.clip(P_f/(P_e + eps), eps, None)
     rel_e = np.clip(sP_e/(P_e + eps), 0, None)

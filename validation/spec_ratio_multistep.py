@@ -26,6 +26,20 @@ R = 6371.0  # km
 EPS = 1e-12
 # 若要裁掉高波數噪聲，設定波數上限；None 表示不裁切
 K_CUTOFF = 56
+LAT_RANGE = (2.25, 45.50)
+LON_RANGE = (104.5, 147.75)
+
+
+def select_bbox_indices(lat2d: np.ndarray, lon2d: np.ndarray, lat_range, lon_range):
+    lat_min, lat_max = min(lat_range), max(lat_range)
+    lon_min, lon_max = min(lon_range), max(lon_range)
+    mask = (lat2d >= lat_min) & (lat2d <= lat_max) & (lon2d >= lon_min) & (lon2d <= lon_max)
+    ys, xs = np.where(mask)
+    if ys.size == 0 or xs.size == 0:
+        raise ValueError("LAT/LON range selection is empty.")
+    y0, y1 = ys.min(), ys.max() + 1
+    x0, x1 = xs.min(), xs.max() + 1
+    return slice(y0, y1), slice(x0, x1)
 
 
 def cell_area_equal_area(lat2d: np.ndarray, lon2d: np.ndarray) -> np.ndarray:
@@ -76,17 +90,29 @@ def discover_suffixes(npz_obj: np.lib.npyio.NpzFile) -> list[str]:
 
 
 def compute_ratio(mean_er: np.ndarray, std_er: np.ndarray, mean_fc: np.ndarray, std_fc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Pangu/ERA5 power ratio and propagated std."""
-    P_e = np.clip(mean_er, EPS, None) ** 2
-    P_f = np.clip(mean_fc, EPS, None) ** 2
-    sP_e = 2 * np.clip(mean_er, EPS, None) * np.clip(std_er, 0, None)
-    sP_f = 2 * np.clip(mean_fc, EPS, None) * np.clip(std_fc, 0, None)
+    """Pangu/ERA5 power ratio and propagated std (energy input)."""
+    P_e = np.clip(mean_er, EPS, None)
+    P_f = np.clip(mean_fc, EPS, None)
+    sP_e = np.clip(std_er, 0, None)
+    sP_f = np.clip(std_fc, 0, None)
 
     ratio = np.clip(P_f / (P_e + EPS), EPS, None)
     rel_e = np.clip(sP_e / (P_e + EPS), 0, None)
     rel_f = np.clip(sP_f / (P_f + EPS), 0, None)
     s_ratio = ratio * np.sqrt(rel_e**2 + rel_f**2)
     return ratio, s_ratio
+
+
+def get_era5_stats(npz_obj, var: str, suffix: str, mask) -> tuple[np.ndarray, np.ndarray]:
+    era_suffix = suffix
+    if suffix != "overall":
+        mean_key = f"era5_mean_{var}_{suffix}"
+        std_key = f"era5_std_{var}_{suffix}"
+        if mean_key not in npz_obj.files or std_key not in npz_obj.files:
+            era_suffix = "overall"
+    mean_er = npz_obj[f"era5_mean_{var}_{era_suffix}"][mask]
+    std_er = npz_obj[f"era5_std_{var}_{era_suffix}"][mask]
+    return mean_er, std_er
 
 
 def format_suffix(sfx: str) -> str:
@@ -101,11 +127,9 @@ def plot_ratio_wavenumber(npz_obj, suffixes: list[str], k: np.ndarray) -> None:
     lead_suffixes = suffixes  # include overall first (already ordered)
     mask_k = (k <= K_CUTOFF) if K_CUTOFF is not None else slice(None)
     for idx, var in enumerate(VARIABLES, 1):
-        mean_er = npz_obj[f"era5_mean_{var}_overall"][mask_k]
-        std_er = npz_obj[f"era5_std_{var}_overall"][mask_k]
-
         ax = plt.subplot(1, len(VARIABLES), idx)
         for sfx in lead_suffixes:
+            mean_er, std_er = get_era5_stats(npz_obj, var, sfx, mask_k)
             mean_fc = npz_obj[f"pangu_mean_{var}_{sfx}"][mask_k]
             std_fc = npz_obj[f"pangu_std_{var}_{sfx}"][mask_k]
             ratio, s_ratio = compute_ratio(mean_er, std_er, mean_fc, std_fc)
@@ -137,11 +161,9 @@ def plot_ratio_wavelength(npz_obj, suffixes: list[str], k: np.ndarray, L_eff: fl
     lam_base = L_eff / k[mask_k]
 
     for idx, var in enumerate(VARIABLES, 1):
-        mean_er = npz_obj[f"era5_mean_{var}_overall"][mask_k]
-        std_er = npz_obj[f"era5_std_{var}_overall"][mask_k]
-
         ax = plt.subplot(1, len(VARIABLES), idx)
         for sfx in lead_suffixes:
+            mean_er, std_er = get_era5_stats(npz_obj, var, sfx, mask_k)
             mean_fc = npz_obj[f"pangu_mean_{var}_{sfx}"][mask_k]
             std_fc = npz_obj[f"pangu_std_{var}_{sfx}"][mask_k]
             ratio, s_ratio = compute_ratio(mean_er, std_er, mean_fc, std_fc)
@@ -178,21 +200,25 @@ def main() -> None:
         if lat.ndim == 1 and lon.ndim == 1:
             lat, lon = np.meshgrid(lat, lon, indexing="ij")
 
-        s_eff = effective_grid_km_equal_area(lat, lon)
-        H_sub, W_sub = lat.shape
+        ys, xs = select_bbox_indices(lat, lon, LAT_RANGE, LON_RANGE)
+        lat_sub = lat[ys, xs]
+        lon_sub = lon[ys, xs]
+
+        s_eff = effective_grid_km_equal_area(lat_sub, lon_sub)
+        H_sub, W_sub = lat_sub.shape
         L_eff = s_eff * min(H_sub, W_sub)
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         # fallback 也對齊 spec_ratio.py
         L_eff = 192 * 28.0
-        print(f"[Info] LAT/LON not found, using fallback L_eff={L_eff:.1f} km")
+        print(f"[Info] LAT/LON not found or invalid, using fallback L_eff={L_eff:.1f} km")
 
     # ---- lead suffix 的選擇 ----
     # 原本有 discover_suffixes(npz_obj)，但你現在手動鎖成 lead24
     # 如果想要自動偵測，再加回 discover_suffixes(npz_obj) 即可
     # suffixes = discover_suffixes(npz_obj)[
     #lead 6-72
-    suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48']#,'lead54','lead60','lead66','lead72']
-   # suffixes = ['lead24','lead30']  # 保留你目前的設定
+    suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48','lead54','lead60','lead66','lead72']
+    suffixes = ['lead24','lead48','lead72']  # 保留你目前的設定
 
     # ---- 繪圖：k-domain & λ-domain ----
     plot_ratio_wavenumber(npz_obj, suffixes, k)

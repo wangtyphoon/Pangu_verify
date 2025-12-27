@@ -8,7 +8,7 @@ from subset import extract_subset
 
 # === 路徑設定（請依實際檔案位置調整）===
 # results 底下的 run 資料夾，內含 output_upper_*.npy
-RUN_DIR = Path(r"../results/2024-10-27-00-00to2024-10-30-00-00")
+RUN_DIR = Path(r"../results/2024-07-18-00-00to2024-07-21-00-00")
 # ERA5 真值根目錄
 ERA5_ROOT = Path(r"../forecasts")
 # 含 latitude/longitude 的 upper.nc，用來裁切 192x192 區域
