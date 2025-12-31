@@ -29,6 +29,76 @@ K_CUTOFF = 56
 LAT_RANGE = (2.25, 45.50)
 LON_RANGE = (104.5, 147.75)
 
+def get_radial_weights_if_any(npz_obj, mask) -> np.ndarray | None:
+    """
+    嘗試抓取每個 k-bin 的權重（mode 數 / count_k），用來把 radial mean 能量轉成更合理的總和。
+    若 npz 沒有提供，回傳 None（等權重加總）。
+    """
+    candidate_keys = ["count_k", "counts_k", "n_k", "radial_count", "radial_counts", "count"]
+    for kk in candidate_keys:
+        if kk in npz_obj.files:
+            w = np.asarray(npz_obj[kk]).reshape(-1)
+            # mask 可能是 slice(None) 或 bool array
+            w_m = w[mask] if not isinstance(mask, slice) else w
+            return w_m.astype(np.float64)
+    return None
+
+
+def total_energy_ratio(mean_er: np.ndarray, mean_fc: np.ndarray, weights: np.ndarray | None = None, eps: float = EPS) -> float:
+    """
+    整體能量比：sum_k(E_fc) / sum_k(E_era5)
+    - mean_er, mean_fc: shape (K,)
+    - weights: shape (K,) or None
+    """
+    E_e = np.clip(np.asarray(mean_er, dtype=np.float64), eps, None)
+    E_f = np.clip(np.asarray(mean_fc, dtype=np.float64), eps, None)
+
+    if weights is None:
+        num = float(E_f.sum())
+        den = float(E_e.sum())
+    else:
+        w = np.asarray(weights, dtype=np.float64)
+        num = float((E_f * w).sum())
+        den = float((E_e * w).sum())
+
+    return num / (den + eps)
+
+
+def summarize_total_energy_ratios(npz_obj, suffixes: list[str], k: np.ndarray, save_csv: bool = False) -> None:
+    """
+    印出（或存檔）每個變數、每個 lead 的整體能量比（對 k 加總）。
+    """
+    # 與繪圖一致的 k 截斷
+    mask_k = (k <= K_CUTOFF) if K_CUTOFF is not None else slice(None)
+    weights = get_radial_weights_if_any(npz_obj, mask_k)
+
+    rows = []
+    for var in VARIABLES:
+        for sfx in suffixes:
+            mean_er, std_er = get_era5_stats(npz_obj, var, sfx, mask_k)
+            mean_fc = npz_obj[f"pangu_mean_{var}_{sfx}"][mask_k]
+
+            r_total = total_energy_ratio(mean_er, mean_fc, weights=weights)
+
+            rows.append({
+                "var": var,
+                "lead": sfx,
+                "label": format_suffix(sfx),
+                "energy_ratio_total": r_total,
+                "k_max_used": float(np.max(k[mask_k])) if not isinstance(mask_k, slice) else float(np.max(k)),
+                "used_weights": (weights is not None),
+            })
+
+    # 以表格形式印出
+    import pandas as pd
+    df = pd.DataFrame(rows).sort_values(["var", "lead"])
+    print("\n=== Total Energy Ratio (sum over k): Pangu / ERA5 ===")
+    print(df.to_string(index=False))
+
+    if save_csv:
+        out = Path(DATA_FILE).with_suffix("").name + "_total_energy_ratio.csv"
+        df.to_csv(out, index=False)
+        print(f"[Info] Saved: {out}")
 
 def select_bbox_indices(lat2d: np.ndarray, lon2d: np.ndarray, lat_range, lon_range):
     lat_min, lat_max = min(lat_range), max(lat_range)
@@ -218,7 +288,10 @@ def main() -> None:
     # suffixes = discover_suffixes(npz_obj)[
     #lead 6-72
     suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48','lead54','lead60','lead66','lead72']
-    suffixes = ['lead24','lead48','lead72']  # 保留你目前的設定
+    #suffixes = ['lead24','lead48','lead72']  # 保留你目前的設定
+
+        # ---- 整體能量比（對 k 加總的單一值）----
+    summarize_total_energy_ratios(npz_obj, suffixes, k, save_csv=False)
 
     # ---- 繪圖：k-domain & λ-domain ----
     plot_ratio_wavenumber(npz_obj, suffixes, k)
