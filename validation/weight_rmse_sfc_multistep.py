@@ -62,6 +62,16 @@ def weighted_mse_dict(forecast_dict, era5_dict, weight):
     return mse_per_var, mse_overall
 
 
+def weighted_bias_dict(forecast_dict, era5_dict, weight):
+    sum_w = np.sum(weight)
+    bias_per_var = {}
+    for var in forecast_dict:
+        err = forecast_dict[var] - era5_dict[var]
+        bias_per_var[var] = float(np.sum(err * weight) / sum_w)
+    bias_overall = float(np.mean(list(bias_per_var.values())))
+    return bias_per_var, bias_overall
+
+
 def surface_to_dict(data, surface_nc_path):
     # 若資料已裁切到目標區域，直接依通道映射回傳
     H, W = weight_2d.shape
@@ -110,8 +120,11 @@ def evaluate_run(run_dir):
         er_dict = surface_to_dict(er_data, nc_path)
 
         mse_dict, mse_all = weighted_mse_dict(fc_dict, er_dict, weight_2d)
+        bias_dict, bias_all = weighted_bias_dict(fc_dict, er_dict, weight_2d)
         rmse_dict = {f"{var}_rmse": np.sqrt(mse) for var, mse in mse_dict.items()}
+        rmse_dict.update({f"{var}_bias": bias for var, bias in bias_dict.items()})
         rmse_dict["overall_rmse"] = np.sqrt(mse_all)
+        rmse_dict["overall_bias"] = bias_all
         rmse_dict["datetime"] = dt_str
         rmse_dict["run"] = run_name
 
@@ -150,12 +163,18 @@ def main():
     if "lead_hours" in df.columns:
         # 先將 RMSE 還原為 MSE 再平均，最後開根號回到 RMSE
         rmse_cols = [c for c in df.columns if c.endswith("_rmse")]
+        bias_cols = [c for c in df.columns if c.endswith("_bias")]
+        lead_df = None
         if rmse_cols:
-            lead_df = (
-                df.groupby("lead_hours")[rmse_cols]
-                .apply(lambda g: np.sqrt((g ** 2).mean()))
-                .sort_index()
+            rmse_df = df.groupby("lead_hours")[rmse_cols].apply(
+                lambda g: np.sqrt((g ** 2).mean())
             )
+            lead_df = rmse_df
+        if bias_cols:
+            bias_df = df.groupby("lead_hours")[bias_cols].mean()
+            lead_df = bias_df if lead_df is None else pd.concat([lead_df, bias_df], axis=1)
+        if lead_df is not None:
+            lead_df = lead_df.sort_index()
             out_lead = "rmse_multistep_sfc72_by_lead.csv"
             lead_df.to_csv(out_lead, float_format="%.8f", encoding="utf-8-sig")
             print(f"已輸出依 lead 平均結果：{out_lead}")

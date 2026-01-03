@@ -60,6 +60,7 @@ def run_pangu_inference(
     overwrite: bool = False,
     save_every_hours: int = 6,
     direct_hours: tuple[int, ...] = (24, 48, 72),
+    save_after_hours: int = 72,   # 例如 72，代表 72 小時之後才開始每 6 小時存檔
 ) -> None:
     """
     Run Pangu-Weather ONNX inference from start_time to end_time.
@@ -80,7 +81,7 @@ def run_pangu_inference(
     forecasts_dir = os.path.join(base_dir, 'forecasts', start_time.strftime("%Y-%m-%d-%H-%M"))
     results_dir = os.path.join(
         base_dir, 'results',
-        f"{start_time.strftime('%Y-%m-%d-%H-%M')}to{end_time.strftime('%Y-%m-%d-%H-%M')}"
+        f"{start_time.strftime('%Y-%m-%d-%H-%M')}"
     )
     if os.path.exists(results_dir):
         if not overwrite:
@@ -182,7 +183,8 @@ def run_pangu_inference(
         h = start_h + save_every_hours
         checkpoints = []
         while h < end_h:
-            checkpoints.append(start_time + timedelta(hours=h))
+            if h >= save_after_hours:
+                checkpoints.append(start_time + timedelta(hours=h))
             h += save_every_hours
         return checkpoints
 
@@ -275,7 +277,7 @@ def filename_to_datetime(fn: str) -> datetime:
     # fn 範例: "1980031500.npz" -> 取前 10 碼 "1980031500"
     return datetime.strptime(fn[:10], "%Y%m%d%H")
 df['date_time'] = df['filename'].apply(filename_to_datetime)
-fourcast_steps = 12  # Define the number of steps for fourcast
+fourcast_steps = 28  # Define the number of steps for fourcast
 mask2024 = (
     (df['date_time'].dt.year == 2024) &
     (df['asc_steps']  >= 1) &
@@ -293,12 +295,13 @@ model_paths = {
 for dt in df2024['date_time']:
     run_pangu_inference(
         start_time=dt,
-        end_time=dt + timedelta(hours=72),
+        end_time=dt + timedelta(hours=168),
         model_paths=model_paths,
         base_dir=r"C:\Users\王子祐\Documents\Pangu-Weather-ReadyToGo",  # 或其它根目錄
         use_gpu=True,
-        overwrite=False,
+        overwrite=True,
         save_every_hours=6,
-        direct_hours=(24, 48, 72),
+        save_after_hours=72,
+        direct_hours=(24, 48, 72, 96, 120, 144, 168),
     )
     # break
