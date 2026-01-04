@@ -1,6 +1,7 @@
 import os
 import sys
-from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
@@ -51,12 +52,61 @@ results_root = os.path.join(BASE_DIR, 'results')
 era5_root = os.path.join(BASE_DIR, 'forecasts')
 reference_nc = '../upper.nc'
 
+# 預報步長設定
+FORECAST_STEP_HOURS = 6
+FORECAST_STEPS = 28
+FORECAST_TOTAL_HOURS = FORECAST_STEPS * FORECAST_STEP_HOURS
+
 # 空間權重（輸出檔案已經裁切過，因此這裡只用來給邊界與緯度加權）
 weight_2d = create_spatial_weights(H=192, W=192, boundary=8, device='cpu')
+reference_path = r"D:\RDL_TC_MODEL\npz\test\prs"
+WORKERS = 6  # 可改成整數，指定平行 worker 數
 
 
 def parse_stamp(stamp: str) -> datetime:
     return datetime.strptime(stamp, "%Y-%m-%d-%H-%M")
+
+
+def consecutive_6h_steps(files, ascending=True):
+    files_sorted = sorted(files, reverse=not ascending)
+    times = [datetime.strptime(f[:10], "%Y%m%d%H") for f in files_sorted]
+    step_list = [0]
+    for i in range(1, len(times)):
+        delta = times[i] - times[i - 1]
+        target = timedelta(hours=6) if ascending else timedelta(hours=-6)
+        if delta == target:
+            step_list.append(step_list[-1] + 1)
+        else:
+            step_list.append(0)
+    return step_list if ascending else step_list[::-1]
+
+
+def filename_to_datetime(fn: str) -> datetime:
+    return datetime.strptime(fn[:10], "%Y%m%d%H")
+
+
+def build_valid_start_set() -> set[str]:
+    all_samples = sorted(
+        [f for f in os.listdir(reference_path) if f.endswith(".npz")]
+    )
+    asc_steps = consecutive_6h_steps(all_samples, ascending=True)
+    desc_steps = consecutive_6h_steps(all_samples, ascending=False)
+
+    df = pd.DataFrame(
+        {
+            "filename": all_samples,
+            "asc_steps": asc_steps,
+            "desc_steps": desc_steps,
+        }
+    )
+    df["date_time"] = df["filename"].apply(filename_to_datetime)
+    mask2024 = (
+        (df["date_time"].dt.year == 2024)
+        & (df["asc_steps"] >= 1)
+        & (df["desc_steps"] >= FORECAST_STEPS)
+    )
+    df2024 = df.loc[mask2024].copy()
+    return set(dt.strftime("%Y-%m-%d-%H-%M") for dt in df2024["date_time"])
 
 
 def compute_wind_speed(u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -104,13 +154,10 @@ def add_wind_speed(var_dict):
 
 def evaluate_run(run_dir):
     run_name = os.path.basename(run_dir)
-    if "to" in run_name:
-        start_str, _ = run_name.split("to", 1)
-        try:
-            run_start = parse_stamp(start_str)
-        except ValueError:
-            run_start = None
-    else:
+    start_str = run_name.split("to", 1)[0] if "to" in run_name else run_name
+    try:
+        run_start = parse_stamp(start_str)
+    except ValueError:
         run_start = None
 
     records = []
@@ -149,8 +196,14 @@ def evaluate_run(run_dir):
 
     return records
 
-def main():
+def main(max_workers: int | None = None):
+    valid_starts = build_valid_start_set()
+    if not valid_starts:
+        print("No valid start times found.")
+        return
+
     all_records = []
+    run_dirs = []
     for folder in sorted(os.listdir(results_root)):
         if not folder.startswith("2024"):
             continue
@@ -158,9 +211,19 @@ def main():
         if not os.path.isdir(run_dir):
             continue
 
-        print(f"Evaluating {folder} ...")
-        recs = evaluate_run(run_dir)
-        all_records.extend(recs)
+        start_str = folder.split("to", 1)[0] if "to" in folder else folder
+        if start_str not in valid_starts:
+            continue
+        run_dirs.append(run_dir)
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(evaluate_run, rd): rd for rd in run_dirs}
+        for future in as_completed(future_map):
+            recs = future.result()
+            if recs:
+                run_name = os.path.basename(future_map[future])
+                print(f"Evaluating {run_name} ...")
+                all_records.extend(recs)
 
     if not all_records:
         print("No valid records found.")
@@ -169,7 +232,7 @@ def main():
     df = pd.DataFrame(all_records).set_index("datetime").sort_index()
 
     # 逐個時間點/樣本的 RMSE
-    out_full = "rmse_multistep_prs72.csv"
+    out_full = f"rmse_multistep_prs{FORECAST_TOTAL_HOURS}.csv"
     df.to_csv(out_full, float_format="%.8f", encoding="utf-8-sig")
     print(f"已輸出逐樣本結果：{out_full}")
     # 依 lead_hours 分組平均（缺少 lead 時略過）
@@ -188,10 +251,10 @@ def main():
             lead_df = bias_df if lead_df is None else pd.concat([lead_df, bias_df], axis=1)
         if lead_df is not None:
             lead_df = lead_df.sort_index()
-            out_lead = "rmse_multistep_prs72_by_lead.csv"
+            out_lead = f"rmse_multistep_prs{FORECAST_TOTAL_HOURS}_by_lead.csv"
             lead_df.to_csv(out_lead, float_format="%.8f", encoding="utf-8-sig")
             print(f"已輸出依 lead 平均結果：{out_lead}")
 
 
 if __name__ == "__main__":
-    main()
+    main(max_workers=WORKERS)

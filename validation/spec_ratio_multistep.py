@@ -15,10 +15,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-VARIABLES = ["z500", "q700", "t850", "u850", "v850"]
-#VARIABLES = ["msl", "u10", "v10", "t2m"]
+#VARIABLES = ["z500", "q700", "t850", "u850", "v850"]
+VARIABLES = ["msl", "u10", "v10", "t2m"]
 
-DATA_FILE = Path(__file__).with_name("all_energy_multistep72.npz")
+DATA_FILE = Path(__file__).with_name("all_energy_multistep_sfc168.npz")
 #SFC_DATA_FILE = Path(__file__).with_name("all_energy_multistep_sfc72.npz")
 LAT_PATH = Path(__file__).resolve().parent.parent / "lat.npy"
 LON_PATH = Path(__file__).resolve().parent.parent / "lon.npy"
@@ -287,8 +287,9 @@ def main() -> None:
     # 如果想要自動偵測，再加回 discover_suffixes(npz_obj) 即可
     # suffixes = discover_suffixes(npz_obj)[
     #lead 6-72
-    suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48','lead54','lead60','lead66','lead72']
-    #suffixes = ['lead24','lead48','lead72']  # 保留你目前的設定
+    #suffixes = ['lead06','lead12','lead18','lead24','lead30','lead36','lead42','lead48','lead54','lead60','lead66','lead72']
+    suffixes = ['lead24','lead48','lead72']  # 保留你目前的設定
+    suffixes = ['lead24','lead48','lead72','lead96','lead120','lead144','lead168']  # 加上 overall
 
         # ---- 整體能量比（對 k 加總的單一值）----
     summarize_total_energy_ratios(npz_obj, suffixes, k, save_csv=False)
