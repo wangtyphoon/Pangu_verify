@@ -7,12 +7,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from subset import extract_subset, extract_subset_surface
+
 # ------------------ Config ------------------
-START_TIME_TAG = "2024083100"
+START_TIME_TAG = "2024072100"
 # RUN_DIR derived from START_TIME_TAG to keep time consistent.
 RUN_DIR = Path("../results") / datetime.strptime(START_TIME_TAG, "%Y%m%d%H").strftime("%Y-%m-%d-%H-%M")
 # If multiple cyclones share the same start time, set CYCLONE_NUM to disambiguate.
-CYCLONE_NUM = 12  # e.g., 1, 2, ...
+CYCLONE_NUM = 5  # e.g., 1, 2, ...
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "cyclone_data_2024.csv"
 LAT_NPY = BASE_DIR / "lat.npy"
@@ -23,6 +25,7 @@ WINDOW_RADIUS = 25
 CENTROID_RADIUS = 6
 OUTPUT_DIR = RUN_DIR / "figures"
 FORECAST_PREFIX = "output_upper_"
+SURFACE_FORECAST_PREFIX = "output_surface_"
 FORECAST_DT_FORMAT = "%Y-%m-%d-%H-%M"
 PANGU_CHANNEL_LEVEL_MAP = {
     "u850": (3, 2),
@@ -30,6 +33,18 @@ PANGU_CHANNEL_LEVEL_MAP = {
     "z700": (0, 3),
     "z850": (0, 2),
 }
+SURFACE_CHANNEL_MAP = {
+    "msl": 0,
+    "u10": 1,
+    "v10": 2,
+    "t2m": 3,
+}
+ERA5_ROOT = BASE_DIR.parent / "forecasts"
+UPPER_NC_PATH = BASE_DIR.parent / "upper.nc"
+SURFACE_NC_PATH = BASE_DIR.parent / "surface.nc"
+INTENSITY_RADIUS = 8
+SUBSET_LAT_RANGE = (0.0, 47.75)
+SUBSET_LON_RANGE = (102.25, 150.0)
 
 # ------------------ Utilities ------------------
 
@@ -48,6 +63,21 @@ def normalize_to_CLHW(arr: np.ndarray, H: int, W: int) -> np.ndarray:
     if arr.ndim == 3 and arr.shape[-1] == H * W:
         return arr.reshape(arr.shape[0], arr.shape[1], H, W)
     raise ValueError(f"Unsupported forecast shape: {arr.shape}")
+
+
+def normalize_to_CHW(arr: np.ndarray, H: int, W: int, channels: int) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim == 3:
+        if arr.shape[0] == channels and arr.shape[1:] == (H, W):
+            return arr
+        if arr.shape[-1] == channels and arr.shape[:2] == (H, W):
+            return np.transpose(arr, (2, 0, 1))
+    if arr.ndim == 2:
+        if arr.shape == (H * W, channels):
+            return arr.reshape(H, W, channels).transpose(2, 0, 1)
+        if arr.shape == (channels, H * W):
+            return arr.reshape(channels, H, W)
+    raise ValueError(f"Unsupported surface shape: {arr.shape}")
 
 
 def to_1d_lat_lon(lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -133,6 +163,111 @@ def extract_pangu_fields(forecast: np.ndarray, H: int, W: int) -> dict[str, np.n
     fields: dict[str, np.ndarray] = {}
     for name, (ch, lv) in PANGU_CHANNEL_LEVEL_MAP.items():
         fields[name] = data[ch, lv, :, :]
+    return fields
+
+
+def surface_to_dict(data: np.ndarray, H: int, W: int) -> dict[str, np.ndarray]:
+    channels = len(SURFACE_CHANNEL_MAP)
+    try:
+        chw = normalize_to_CHW(data, H, W, channels)
+        return {name: chw[ch, :, :] for name, ch in SURFACE_CHANNEL_MAP.items()}
+    except ValueError:
+        arr = np.asarray(data)
+        if arr.ndim == 3:
+            if arr.shape[0] == channels:
+                chw = arr
+            elif arr.shape[-1] == channels:
+                chw = np.transpose(arr, (2, 0, 1))
+            else:
+                chw = None
+            if chw is not None:
+                sub = subset_global_chw(chw, SUBSET_LAT_RANGE, SUBSET_LON_RANGE)
+                return {name: sub[ch, :, :] for name, ch in SURFACE_CHANNEL_MAP.items()}
+
+        if not SURFACE_NC_PATH.exists():
+            raise FileNotFoundError(f"Missing surface.nc for target subset: {SURFACE_NC_PATH}")
+        return extract_subset_surface(data, str(SURFACE_NC_PATH), SURFACE_CHANNEL_MAP)
+
+
+def upper_to_dict(data: np.ndarray, H: int, W: int) -> dict[str, np.ndarray]:
+    try:
+        return extract_pangu_fields(data, H, W)
+    except ValueError:
+        arr = np.asarray(data)
+        if arr.ndim == 4 and (arr.shape[-2], arr.shape[-1]) != (H, W):
+            try:
+                return subset_global_upper(arr, SUBSET_LAT_RANGE, SUBSET_LON_RANGE)
+            except ValueError:
+                pass
+
+        if not UPPER_NC_PATH.exists():
+            raise FileNotFoundError(f"Missing upper.nc for target subset: {UPPER_NC_PATH}")
+        return extract_subset(data, str(UPPER_NC_PATH), PANGU_CHANNEL_LEVEL_MAP)
+
+
+def compute_wind_speed(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    return np.sqrt(np.square(u) + np.square(v))
+
+
+def safe_nanmin(arr: np.ndarray) -> float:
+    return float(np.nanmin(arr)) if np.any(np.isfinite(arr)) else float("nan")
+
+
+def safe_nanmax(arr: np.ndarray) -> float:
+    return float(np.nanmax(arr)) if np.any(np.isfinite(arr)) else float("nan")
+
+
+def build_global_lat_lon(H: int, W: int) -> tuple[np.ndarray, np.ndarray]:
+    lat = np.linspace(90.0, -90.0, H)
+    lon = np.linspace(0.0, 360.0 - 360.0 / W, W)
+    return lat, lon
+
+
+def select_bbox_slices(lat1d: np.ndarray, lon1d: np.ndarray, lat_range, lon_range) -> tuple[slice, slice]:
+    lat_min, lat_max = min(lat_range), max(lat_range)
+    lon_min, lon_max = min(lon_range), max(lon_range)
+    lat_mask = (lat1d >= lat_min) & (lat1d <= lat_max)
+    lon_mask = (lon1d >= lon_min) & (lon1d <= lon_max)
+    if not np.any(lat_mask) or not np.any(lon_mask):
+        raise ValueError("Subset range does not overlap grid.")
+    lat_idx = np.where(lat_mask)[0]
+    lon_idx = np.where(lon_mask)[0]
+    return slice(lat_idx.min(), lat_idx.max() + 1), slice(lon_idx.min(), lon_idx.max() + 1)
+
+
+def subset_global_chw(
+    data_chw: np.ndarray,
+    lat_range: tuple[float, float],
+    lon_range: tuple[float, float],
+) -> np.ndarray:
+    _, H, W = data_chw.shape
+    lat1d, lon1d = build_global_lat_lon(H, W)
+    lat_sl, lon_sl = select_bbox_slices(lat1d, lon1d, lat_range, lon_range)
+    return data_chw[:, lat_sl, lon_sl]
+
+
+def subset_global_upper(
+    data: np.ndarray,
+    lat_range: tuple[float, float],
+    lon_range: tuple[float, float],
+) -> dict[str, np.ndarray]:
+    if data.ndim != 4:
+        raise ValueError(f"Unsupported upper shape: {data.shape}")
+    max_ch = max(ch for ch, _ in PANGU_CHANNEL_LEVEL_MAP.values()) + 1
+    max_lv = max(lv for _, lv in PANGU_CHANNEL_LEVEL_MAP.values()) + 1
+    if data.shape[0] == max_ch and data.shape[1] >= max_lv:
+        arr = data
+    elif data.shape[1] == max_ch and data.shape[0] >= max_lv:
+        arr = np.transpose(data, (1, 0, 2, 3))
+    else:
+        raise ValueError(f"Unsupported upper shape: {data.shape}")
+    H, W = arr.shape[-2:]
+    lat1d, lon1d = build_global_lat_lon(H, W)
+    lat_sl, lon_sl = select_bbox_slices(lat1d, lon1d, lat_range, lon_range)
+
+    fields: dict[str, np.ndarray] = {}
+    for name, (ch, lv) in PANGU_CHANNEL_LEVEL_MAP.items():
+        fields[name] = arr[ch, lv, lat_sl, lon_sl]
     return fields
 
 
@@ -263,6 +398,160 @@ def track_with_vorticity(
         )
 
     return records
+
+
+def compute_intensity_metrics(
+    msl: np.ndarray,
+    u10: np.ndarray,
+    v10: np.ndarray,
+    u850: np.ndarray,
+    v850: np.ndarray,
+    center_i: int,
+    center_j: int,
+    radius: int,
+) -> tuple[float, float, float]:
+    H, W = msl.shape
+    i0, i1, j0, j1 = make_window(center_i, center_j, radius, H, W)
+    s10 = compute_wind_speed(u10, v10)
+    s850 = compute_wind_speed(u850, v850)
+
+    msl_min_hpa = safe_nanmin(msl[i0:i1, j0:j1]) / 100.0
+    s10_max = safe_nanmax(s10[i0:i1, j0:j1])
+    s850_max = safe_nanmax(s850[i0:i1, j0:j1])
+    return msl_min_hpa, s10_max, s850_max
+
+
+def collect_intensity_timeseries(
+    step_files: list[dict],
+    pred_track: pd.DataFrame,
+    truth_track: pd.DataFrame,
+    lat1d: np.ndarray,
+    lon1d: np.ndarray,
+) -> pd.DataFrame:
+    pred_idx = pred_track.set_index("time")[["lat", "lon"]]
+    truth_idx = truth_track.set_index("DATE_TIME")[["LAT", "LON"]]
+    H, W = lat1d.size, lon1d.size
+    records: list[dict] = []
+
+    for step in step_files:
+        valid_time = step["valid_time"]
+        lead_hours = int(step["step"]) * STEP_HOURS
+        dt_str = step["path"].stem[len(FORECAST_PREFIX) :]
+
+        rec = {
+            "time": valid_time,
+            "lead_hours": lead_hours,
+            "forecast_msl_min_hPa": float("nan"),
+            "forecast_s10_max": float("nan"),
+            "forecast_s850_max": float("nan"),
+            "target_msl_min_hPa": float("nan"),
+            "target_s10_max": float("nan"),
+            "target_s850_max": float("nan"),
+        }
+
+        if valid_time in pred_idx.index:
+            fc_surface_path = step["path"].with_name(f"{SURFACE_FORECAST_PREFIX}{dt_str}.npy")
+            if fc_surface_path.exists():
+                fc_surface = np.load(fc_surface_path)
+                fc_upper = np.load(step["path"])
+                fc_sfc = surface_to_dict(fc_surface, H, W)
+                fc_prs = upper_to_dict(fc_upper, H, W)
+
+                f_lat = float(pred_idx.loc[valid_time, "lat"])
+                f_lon = float(pred_idx.loc[valid_time, "lon"])
+                f_i, f_j = safe_window_center(lat1d, lon1d, f_lat, f_lon)
+                rec["forecast_msl_min_hPa"], rec["forecast_s10_max"], rec["forecast_s850_max"] = (
+                    compute_intensity_metrics(
+                        fc_sfc["msl"],
+                        fc_sfc["u10"],
+                        fc_sfc["v10"],
+                        fc_prs["u850"],
+                        fc_prs["v850"],
+                        f_i,
+                        f_j,
+                        INTENSITY_RADIUS,
+                    )
+                )
+            else:
+                print(f"[WARN] Missing forecast surface: {fc_surface_path}")
+
+        if valid_time in truth_idx.index:
+            er_dir = ERA5_ROOT / dt_str
+            er_surface_path = er_dir / "input_surface.npy"
+            er_upper_path = er_dir / "input_upper.npy"
+            if er_surface_path.exists() and er_upper_path.exists():
+                er_surface = np.load(er_surface_path)
+                er_upper = np.load(er_upper_path)
+                er_sfc = surface_to_dict(er_surface, H, W)
+                er_prs = upper_to_dict(er_upper, H, W)
+
+                t_lat = float(truth_idx.loc[valid_time, "LAT"])
+                t_lon = float(truth_idx.loc[valid_time, "LON"])
+                t_i, t_j = safe_window_center(lat1d, lon1d, t_lat, t_lon)
+                rec["target_msl_min_hPa"], rec["target_s10_max"], rec["target_s850_max"] = (
+                    compute_intensity_metrics(
+                        er_sfc["msl"],
+                        er_sfc["u10"],
+                        er_sfc["v10"],
+                        er_prs["u850"],
+                        er_prs["v850"],
+                        t_i,
+                        t_j,
+                        INTENSITY_RADIUS,
+                    )
+                )
+            else:
+                if not er_surface_path.exists():
+                    print(f"[WARN] Missing target surface: {er_surface_path}")
+                if not er_upper_path.exists():
+                    print(f"[WARN] Missing target upper: {er_upper_path}")
+
+        records.append(rec)
+
+    df = pd.DataFrame.from_records(records).sort_values("lead_hours")
+    return df
+
+
+def plot_intensity_timeseries(
+    intensity_df: pd.DataFrame,
+    output_path: Path,
+    start_time_tag: str,
+    cyclone_num: int,
+) -> None:
+    try:
+        import matplotlib
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("matplotlib is required. Install with `pip install matplotlib`.") from exc
+
+    #matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(3, 1, figsize=(8.5, 8.5), sharex=True)
+    x = intensity_df["lead_hours"].to_numpy()
+
+    axes[0].plot(x, intensity_df["forecast_s10_max"], "-o", label="Forecast")
+    axes[0].plot(x, intensity_df["target_s10_max"], "-o", label="Target (BST)")
+    axes[0].set_ylabel("10m wind max (m/s)")
+    axes[0].grid(alpha=0.4)
+    axes[0].legend(loc="best")
+
+    axes[1].plot(x, intensity_df["forecast_s850_max"], "-o", label="Forecast")
+    axes[1].plot(x, intensity_df["target_s850_max"], "-o", label="Target (BST)")
+    axes[1].set_ylabel("850 hPa wind max (m/s)")
+    axes[1].grid(alpha=0.4)
+
+    axes[2].plot(x, intensity_df["forecast_msl_min_hPa"], "-o", label="Forecast")
+    axes[2].plot(x, intensity_df["target_msl_min_hPa"], "-o", label="Target (BST)")
+    axes[2].set_ylabel("MSL min (hPa)")
+    axes[2].set_xlabel("Lead hours")
+    axes[2].grid(alpha=0.4)
+
+    fig.suptitle(f"TC Intensity (Init: {start_time_tag}, Cyclone {cyclone_num})", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.show()
 
 
 def plot_tracks(truth: pd.DataFrame, pred: pd.DataFrame, output_path: Path, start_time_tag: str) -> None:
@@ -406,6 +695,20 @@ def main() -> None:
 
     print(f"Saved track figure: {output_path}")
     print(f"Saved predicted track CSV: {pred_csv}")
+
+    intensity_df = collect_intensity_timeseries(
+        step_files,
+        pred_track,
+        truth_track,
+        lat1d,
+        lon1d,
+    )
+    if intensity_df.empty:
+        print("[WARN] No intensity records to plot.")
+    else:
+        intensity_path = OUTPUT_DIR / f"tc_intensity_{START_TIME_TAG}_cyclone{cyclone_num}.png"
+        plot_intensity_timeseries(intensity_df, intensity_path, START_TIME_TAG, cyclone_num)
+        print(f"Saved intensity figure: {intensity_path}")
 
 
 if __name__ == "__main__":
