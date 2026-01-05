@@ -10,11 +10,11 @@ import pandas as pd
 from subset import extract_subset, extract_subset_surface
 
 # ------------------ Config ------------------
-START_TIME_TAG = "2024072100"
+START_TIME_TAG = "2024111200"
 # RUN_DIR derived from START_TIME_TAG to keep time consistent.
 RUN_DIR = Path("../results") / datetime.strptime(START_TIME_TAG, "%Y%m%d%H").strftime("%Y-%m-%d-%H-%M")
 # If multiple cyclones share the same start time, set CYCLONE_NUM to disambiguate.
-CYCLONE_NUM = 5  # e.g., 1, 2, ...
+CYCLONE_NUM = 25  # e.g., 1, 2, ...
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "cyclone_data_2024.csv"
 LAT_NPY = BASE_DIR / "lat.npy"
