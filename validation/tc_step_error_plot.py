@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-CSV_PATH = Path(__file__).resolve().parent / "tc_bst_z700_metrics.csv"
+CSV_PATH = Path(__file__).resolve().parent / "tc_bst_z700_metrics35.csv"
 
 
 def haversine_km(lat1: np.ndarray, lon1: np.ndarray, lat2: np.ndarray, lon2: np.ndarray) -> np.ndarray:
