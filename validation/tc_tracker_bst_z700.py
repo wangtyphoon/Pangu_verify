@@ -25,14 +25,20 @@ FORECAST_DT_FORMAT = "%Y-%m-%d-%H-%M"
 STEP_HOURS = 6
 REQUIRED_FORECAST_STEPS = 28
 
-WINDOW_RADIUS = 25
+WINDOW_RADIUS_LAT = 12
+WINDOW_RADIUS_LON = 16
 CENTROID_RADIUS = 6
-INTENSITY_RADIUS = 8
+INTENSITY_RADIUS = 6
 
 SUBSET_LAT_RANGE = (0.0, 47.75)
 SUBSET_LON_RANGE = (102.25, 150.0)
 
 OUTPUT_CSV = BASE_DIR / "tc_bst_z700_metrics.csv"
+
+BOUNDARY_MARGIN_DEG = 5.0
+VMAX_MIN = 25.0
+INERTIA_WEIGHT = 1
+MAX_SEED_DISPLACEMENT_DEG = 5.5
 
 PANGU_CHANNEL_LEVEL_MAP = {
     "u850": (3, 2),
@@ -124,6 +130,35 @@ def make_window(i: int, j: int, radius: int, H: int, W: int) -> tuple[int, int, 
     if j0 >= j1:
         j0, j1 = j, j + 1
     return i0, i1, j0, j1
+
+
+def make_window_rect(
+    i: int,
+    j: int,
+    radius_i: int,
+    radius_j: int,
+    H: int,
+    W: int,
+) -> tuple[int, int, int, int]:
+    i0, i1 = max(0, i - radius_i), min(H, i + radius_i + 1)
+    j0, j1 = max(0, j - radius_j), min(W, j + radius_j + 1)
+    if i0 >= i1:
+        i0, i1 = i, i + 1
+    if j0 >= j1:
+        j0, j1 = j, j + 1
+    return i0, i1, j0, j1
+
+
+def deg_distance(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    lon_axis_1d: np.ndarray,
+) -> float:
+    lon1_adj = align_lon_system(lon_axis_1d, lon1)
+    lon2_adj = align_lon_system(lon_axis_1d, lon2)
+    return float(math.hypot(lat2 - lat1, lon2_adj - lon1_adj))
 
 
 def weighted_centroid_latlon(
@@ -389,19 +424,59 @@ def track_with_z700(
     lon1d: np.ndarray,
     start_lat: float,
     start_lon: float,
+    bst_track: pd.DataFrame,
 ) -> list[dict]:
     H, W = lat1d.size, lon1d.size
     prev_i, prev_j = safe_window_center(lat1d, lon1d, start_lat, start_lon)
+    prev_lat, prev_lon = float(start_lat), float(start_lon)
+    bst_idx = bst_track.set_index("DATE_TIME")[["LAT", "LON"]]
+    pred_history: list[tuple[float, float]] = []
+    bst_history: list[tuple[float, float]] = []
 
     records: list[dict] = []
     for step in step_files:
         step_idx = int(step["step"])
         valid_time = step["valid_time"]
+        bst_lat = float("nan")
+        bst_lon = float("nan")
+        if valid_time in bst_idx.index:
+            bst_lat = float(bst_idx.loc[valid_time, "LAT"])
+            bst_lon = float(bst_idx.loc[valid_time, "LON"])
+
+        if len(pred_history) >= 2:
+            lat_last, lon_last = pred_history[-1]
+            lat_prev, lon_prev = pred_history[-2]
+            seed_lat = lat_last + INERTIA_WEIGHT * (lat_last - lat_prev)
+            seed_lon = lon_last + INERTIA_WEIGHT * (lon_last - lon_prev)
+        elif len(bst_history) >= 2:
+            lat_last, lon_last = bst_history[-1]
+            lat_prev, lon_prev = bst_history[-2]
+            seed_lat = lat_last + INERTIA_WEIGHT * (lat_last - lat_prev)
+            seed_lon = lon_last + INERTIA_WEIGHT * (lon_last - lon_prev)
+        elif np.isfinite(bst_lat) and np.isfinite(bst_lon):
+            seed_lat, seed_lon = bst_lat, bst_lon
+        else:
+            seed_lat, seed_lon = prev_lat, prev_lon
+
+        if (
+            deg_distance(prev_lat, prev_lon, seed_lat, seed_lon, lon1d)
+            > MAX_SEED_DISPLACEMENT_DEG
+        ):
+            seed_lat, seed_lon = prev_lat, prev_lon
+
         forecast_raw = np.load(step["path"])
         fields = upper_to_dict(forecast_raw, H, W)
         z700 = fields["z700"]
 
-        i0, i1, j0, j1 = make_window(prev_i, prev_j, WINDOW_RADIUS, H, W)
+        seed_i, seed_j = safe_window_center(lat1d, lon1d, seed_lat, seed_lon)
+        i0, i1, j0, j1 = make_window_rect(
+            seed_i,
+            seed_j,
+            WINDOW_RADIUS_LAT,
+            WINDOW_RADIUS_LON,
+            H,
+            W,
+        )
         window = z700[i0:i1, j0:j1]
         if np.all(np.isnan(window)):
             i, j = np.unravel_index(np.nanargmin(z700), z700.shape)
@@ -420,12 +495,20 @@ def track_with_z700(
             mode="min",
         )
         prev_i, prev_j = safe_window_center(lat1d, lon1d, centroid_lat, centroid_lon)
+        prev_lat, prev_lon = float(centroid_lat), float(centroid_lon)
+        pred_history.append((prev_lat, prev_lon))
+        if np.isfinite(bst_lat) and np.isfinite(bst_lon):
+            bst_history.append((bst_lat, bst_lon))
+
+        dist_idx = float(math.hypot(i - seed_i, j - seed_j))
+        seed_far_flag = int(dist_idx > 0.8 * max(WINDOW_RADIUS_LAT, WINDOW_RADIUS_LON))
         records.append(
             {
                 "time": valid_time,
                 "step": step_idx,
                 "lat": float(centroid_lat),
                 "lon": float(centroid_lon),
+                "seed_far_flag": seed_far_flag,
                 "source_file": step["path"].name,
             }
         )
@@ -469,6 +552,33 @@ def parse_best_track_datetime(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def filter_bst_records(
+    df: pd.DataFrame,
+    lat1d: np.ndarray,
+    lon1d: np.ndarray,
+    margin_deg: float,
+    vmax_min: float,
+) -> pd.DataFrame:
+    lat_min, lat_max = float(np.nanmin(lat1d)), float(np.nanmax(lat1d))
+    lon_min, lon_max = float(np.nanmin(lon1d)), float(np.nanmax(lon1d))
+    lat_lo, lat_hi = min(lat_min, lat_max) + margin_deg, max(lat_min, lat_max) - margin_deg
+    lon_lo, lon_hi = min(lon_min, lon_max) + margin_deg, max(lon_min, lon_max) - margin_deg
+
+    lat_vals = pd.to_numeric(df["LAT"], errors="coerce")
+    lon_vals = pd.to_numeric(df["LON"], errors="coerce")
+    lon_adj = lon_vals.apply(lambda v: align_lon_system(lon1d, v) if np.isfinite(v) else v)
+    if "VMAX" not in df.columns:
+        raise KeyError("Missing VMAX column in cyclone data.")
+    vmax_vals = pd.to_numeric(df["VMAX"], errors="coerce")
+
+    mask = (
+        lat_vals.between(lat_lo, lat_hi)
+        & lon_adj.between(lon_lo, lon_hi)
+        & (vmax_vals >= vmax_min)
+    )
+    return df.loc[mask].copy()
+
+
 def collect_intensity_records(
     step_files: list[dict],
     pred_track: pd.DataFrame,
@@ -478,7 +588,7 @@ def collect_intensity_records(
     init_time: datetime,
     cyclone_num: int,
 ) -> list[dict]:
-    pred_idx = pred_track.set_index("time")[["lat", "lon"]]
+    pred_idx = pred_track.set_index("time")[["lat", "lon", "seed_far_flag"]]
     truth_idx = truth_track.set_index("DATE_TIME")[["LAT", "LON"]]
     H, W = lat1d.size, lon1d.size
     records: list[dict] = []
@@ -496,6 +606,7 @@ def collect_intensity_records(
             "step": int(step["step"]),
             "forecast_lat": float("nan"),
             "forecast_lon": float("nan"),
+            "seed_far_flag": 0,
             "bst_lat": float("nan"),
             "bst_lon": float("nan"),
             "forecast_msl_min_hPa": float("nan"),
@@ -509,6 +620,7 @@ def collect_intensity_records(
         if valid_time in pred_idx.index:
             rec["forecast_lat"] = float(pred_idx.loc[valid_time, "lat"])
             rec["forecast_lon"] = float(pred_idx.loc[valid_time, "lon"])
+            rec["seed_far_flag"] = int(pred_idx.loc[valid_time, "seed_far_flag"])
 
         if valid_time in truth_idx.index:
             rec["bst_lat"] = float(truth_idx.loc[valid_time, "LAT"])
@@ -581,6 +693,7 @@ def main() -> None:
     lat_raw = np.load(LAT_NPY)
     lon_raw = np.load(LON_NPY)
     lat1d, lon1d = to_1d_lat_lon(lat_raw, lon_raw)
+    df = filter_bst_records(df, lat1d, lon1d, BOUNDARY_MARGIN_DEG, VMAX_MIN)
 
     step_files = collect_all_forecast_steps(RESULTS_DIR, REQUIRED_FORECAST_STEPS)
     if not step_files:
@@ -605,7 +718,14 @@ def main() -> None:
             start_lon = float(start_match.iloc[0]["LON"])
             print(f"Processing init {init_time:%Y-%m-%d %H:%M}, cyclone #{cyclone_num}")
 
-            pred_records = track_with_z700(run_steps, lat1d, lon1d, start_lat, start_lon)
+            pred_records = track_with_z700(
+                run_steps,
+                lat1d,
+                lon1d,
+                start_lat,
+                start_lon,
+                track_df,
+            )
             pred_track = pd.DataFrame.from_records(pred_records)
             records.extend(
                 collect_intensity_records(

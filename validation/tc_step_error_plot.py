@@ -85,10 +85,13 @@ def main() -> None:
         raise FileNotFoundError(f"Missing CSV: {CSV_PATH}")
 
     df = pd.read_csv(CSV_PATH)
-
-    df = df[(df['bst_lat'] > 5) & (df['bst_lat'] < 42.25)]
-    df = df[(df['bst_lon'] > 107.5) & (df['bst_lon'] < 142.5)]
-    df = df[df['target_s10_max'] > 12]
+    df =df.dropna(subset=[ 'bst_lat', 'bst_lon'])
+    df = df[(df['forecast_lat'] > 5) & (df['forecast_lat'] < 42.25)]
+    df = df[(df['forecast_lon'] > 107.5) & (df['forecast_lon'] < 142.5)]
+    print(len(df), "total rows in CSV")
+    # df = df[(df['bst_lat'] > 5) & (df['bst_lat'] < 42.25)]
+    # df = df[(df['bst_lon'] > 107.5) & (df['bst_lon'] < 142.5)]
+    # df = df[df['target_s10_max'] > 12]
     summary = build_summary(df)
     print(summary.to_string(index=False))
     plot_summary(summary)
