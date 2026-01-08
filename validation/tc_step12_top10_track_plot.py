@@ -7,7 +7,7 @@ import pandas as pd
 
 # ------------------ Config ------------------
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_CSV = BASE_DIR / "tc_bst_z700_metrics.csv"
+INPUT_CSV = BASE_DIR / "tc_bst_z700_metrics35.csv"
 TARGET_STEP = 12
 TOP_N = 10
 OUTPUT_PNG = BASE_DIR / "tc_step12_top10_track_plot.png"
@@ -82,7 +82,7 @@ def main() -> None:
 
     df_step["track_error_km"] = track_error_km(df_step)
     top_cases = (
-        df_step.sort_values("track_error_km", ascending=True)
+        df_step.sort_values("track_error_km", ascending=False)
         .head(TOP_N)[["init_time", "cyclone_num", "track_error_km"]]
         .reset_index(drop=True)
     )
