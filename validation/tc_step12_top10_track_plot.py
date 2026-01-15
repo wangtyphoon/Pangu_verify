@@ -57,7 +57,7 @@ def main() -> None:
     # df = df[df['CYCLONE_NUM']==5]
     # df = df[df['target_s10_max'] > 12]
     # print(len(df), "total rows in", INPUT_CSV)
-    # df = df[df['forecast_s10_max'] > 12]
+    df = df[df['forecast_s10_max'] > 12]
     # # print(len(df), "total rows in", INPUT_CSV)
     # df = df[df['seed_distance_flag']==0]
     # print(len(df), "total rows in", INPUT_CSV)

@@ -23,7 +23,7 @@ FORECAST_PREFIX = "output_upper_"
 SURFACE_FORECAST_PREFIX = "output_surface_"
 FORECAST_DT_FORMAT = "%Y-%m-%d-%H-%M"
 STEP_HOURS = 6
-REQUIRED_FORECAST_STEPS = 28
+REQUIRED_FORECAST_STEPS = 12
 
 WINDOW_RADIUS_LAT = 12
 WINDOW_RADIUS_LON = 16
@@ -33,7 +33,7 @@ INTENSITY_RADIUS = 6
 SUBSET_LAT_RANGE = (0.0, 47.75)
 SUBSET_LON_RANGE = (102.25, 150.0)
 
-OUTPUT_CSV = BASE_DIR / "tc_bst_z700_metrics35.csv"
+OUTPUT_CSV = BASE_DIR / "tc_bst_z700_metrics35_step12.csv"
 
 BOUNDARY_MARGIN_DEG = 5.0
 VMAX_MIN = 35.0
@@ -373,8 +373,13 @@ def has_required_steps(step_files: list[dict], required_steps: int | None) -> bo
         return True
     if required_steps <= 0 or not step_files:
         return False
-    max_step = max(int(step["step"]) for step in step_files)
-    return max_step == required_steps
+    step_indices = [int(step["step"]) for step in step_files]
+    max_step = max(step_indices)
+    if max_step < required_steps:
+        return False
+    if step_indices.count(required_steps) != 1:
+        return False
+    return True
 
 
 def collect_all_forecast_steps(results_dir: Path, required_steps: int | None) -> list[dict]:
@@ -401,6 +406,9 @@ def collect_all_forecast_steps(results_dir: Path, required_steps: int | None) ->
                 f"required_steps={required_steps})"
             )
             continue
+
+        if required_steps is not None:
+            run_steps = [step for step in run_steps if int(step["step"]) <= required_steps]
 
         for step in run_steps:
             step["init_time"] = init_time
