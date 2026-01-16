@@ -17,15 +17,15 @@ from tc_tracker_bst_msl import (
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35.csv")
+    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
-    output_path: Path = Path("tc_bst_msl_metrics35.csv")
+    output_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
     r8_threshold: float = 8.0
     max_radius_km: float = 2000.0
-    radial_bin_km: float = 10.0
+    radial_bin_km: float = 25.0
     smooth_window: int = 5
 
 
@@ -132,11 +132,13 @@ def compute_metrics(
     if not np.any(within):
         return float("nan"), float("nan"), float("nan")
 
-    s10_masked = np.where(within, s10, np.nan)
-    vmax = float(np.nanmax(s10_masked)) if np.any(np.isfinite(s10_masked)) else float("nan")
-
     r_km, profile = radial_profile(dist_km, s10, cfg.max_radius_km, cfg.radial_bin_km)
     profile_smooth = smooth_profile(profile, cfg.smooth_window)
+
+    if np.any(np.isfinite(profile_smooth)):
+        vmax = float(np.nanmax(profile_smooth))
+    else:
+        vmax = float("nan")
 
     if np.any(np.isfinite(profile_smooth)):
         rmax_km = float(r_km[int(np.nanargmax(profile_smooth))])

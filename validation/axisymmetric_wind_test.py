@@ -20,12 +20,12 @@ from tc_tracker_bst_msl import (
 class Config:
     csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
     results_dir: Path = Path("../results")
-    step_target: int = 12
+    step_target: int = 1
     row_index: int = 0
     center_source: str = "forecast"  # "forecast" or "bst"
     r8_threshold: float = 8.0
     max_radius_km: float = 2000.0
-    radial_bin_km: float = 10.0
+    radial_bin_km: float = 25.0
     smooth_window: int = 5
     output_png: Path = Path("axisymmetric_s10_step12.png")
 
@@ -202,6 +202,11 @@ def main() -> None:
     profile_smooth = smooth_profile(profile, cfg.smooth_window)
 
     if np.any(np.isfinite(profile_smooth)):
+        vmax = float(np.nanmax(profile_smooth))
+    else:
+        vmax = float("nan")
+
+    if np.any(np.isfinite(profile_smooth)):
         rmax_km = float(r_km[int(np.nanargmax(profile_smooth))])
     else:
         rmax_km = float("nan")
@@ -248,6 +253,7 @@ def main() -> None:
 
     print(f"Saved: {cfg.output_png}")
     print(f"Center: lat={center_lat:.3f}, lon={center_lon_adj:.3f}")
+    print(f"Vmax_axisymmetric={vmax:.2f} m/s")
     print(f"Rmax_km={rmax_km:.1f}, R8_km={r8_km:.1f}")
 
 
