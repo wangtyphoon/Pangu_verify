@@ -23,17 +23,17 @@ PANGU_LEVELS = 13
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_z700_metrics35_step12.csv")
+    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    step_target: int = 12
+    step_target: int = 1
     row_index: int = 0
     max_radius_km: float = 2000.0
     radial_bin_km: float = 25.0
-    target_radius_km: float = 500.0
+    target_radius_km: float = 100.0
     z_is_geopotential: bool = True
 
 
@@ -56,17 +56,14 @@ def dt_to_era5_dir(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d-%H-00")
 
 
-def adjust_lon_grid(lon1d: np.ndarray, center_lon: float) -> tuple[np.ndarray, float]:
-    lon_min, lon_max = float(np.nanmin(lon1d)), float(np.nanmax(lon1d))
-    lon_center = align_lon_system(lon1d, center_lon)
-    lon_grid = lon1d.copy()
-    if lon_min >= 0 and lon_center < 0:
-        lon_grid = lon_grid + 360.0
-        lon_center += 360.0
-    if lon_max <= 180 and lon_center > 180:
-        lon_grid = lon_grid - 360.0
-        lon_center -= 360.0
-    return lon_grid, lon_center
+def normalize_lon(lon_axis_1d: np.ndarray, lon_value: float) -> float:
+    v = align_lon_system(lon_axis_1d, lon_value)
+    lo_min, lo_max = np.nanmin(lon_axis_1d), np.nanmax(lon_axis_1d)
+    if lo_min >= 0 and lo_max > 180:
+        v = v % 360.0
+    elif lo_max <= 180:
+        v = ((v + 180.0) % 360.0) - 180.0
+    return float(v)
 
 
 def haversine_km(lat2d: np.ndarray, lon2d: np.ndarray, lat0: float, lon0: float) -> np.ndarray:
@@ -82,42 +79,49 @@ def haversine_km(lat2d: np.ndarray, lon2d: np.ndarray, lat0: float, lon0: float)
     return radius_km * c
 
 
-def radial_profile(
-    distance_km: np.ndarray,
-    values: np.ndarray,
-    max_radius_km: float,
+def axisymmetric_mean(
+    field2d: np.ndarray,
+    lat1d: np.ndarray,
+    lon1d: np.ndarray,
+    center_lat: float,
+    center_lon: float,
     bin_km: float,
+    max_radius_km: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     bins = np.arange(0.0, max_radius_km + bin_km, bin_km)
     centers = 0.5 * (bins[:-1] + bins[1:])
     profile = np.full(centers.shape, np.nan)
 
-    dist_flat = distance_km.ravel()
-    val_flat = values.ravel()
-    valid = np.isfinite(dist_flat) & np.isfinite(val_flat)
-    if not np.any(valid):
-        return centers, profile
-
-    dist_flat = dist_flat[valid]
-    val_flat = val_flat[valid]
-    bin_index = np.digitize(dist_flat, bins) - 1
+    lat2d = lat1d[:, None]
+    lon2d = lon1d[None, :]
+    dist_km = haversine_km(lat2d, lon2d, center_lat, center_lon)
 
     for i in range(centers.size):
-        mask = bin_index == i
+        mask = (dist_km >= bins[i]) & (dist_km < bins[i + 1])
         if np.any(mask):
-            profile[i] = float(np.mean(val_flat[mask]))
+            profile[i] = float(np.nanmean(field2d[mask]))
     return centers, profile
 
 
 def interp_profile(r_km: np.ndarray, profile: np.ndarray, target_km: float) -> float:
-    mask = np.isfinite(profile)
+    mask = np.isfinite(profile) & np.isfinite(r_km)
     if not np.any(mask):
         return float("nan")
     r_valid = r_km[mask]
     p_valid = profile[mask]
-    if target_km < float(np.min(r_valid)) or target_km > float(np.max(r_valid)):
-        return float("nan")
     return float(np.interp(target_km, r_valid, p_valid))
+
+
+def nearest_grid_value(
+    field2d: np.ndarray,
+    lat1d: np.ndarray,
+    lon1d: np.ndarray,
+    center_lat: float,
+    center_lon: float,
+) -> float:
+    i = int(np.nanargmin(np.abs(lat1d - center_lat)))
+    j = int(np.nanargmin(np.abs(lon1d - center_lon)))
+    return float(field2d[i, j])
 
 
 def normalize_to_clhw(arr: np.ndarray, H: int, W: int) -> np.ndarray:
@@ -219,29 +223,44 @@ def compute_gwb(
     center_lon: float,
     cfg: Config,
 ) -> dict[str, float]:
-    lon1d_adj, center_lon_adj = adjust_lon_grid(lon1d, center_lon)
+    center_lon_norm = normalize_lon(lon1d, center_lon)
     H, W = lat1d.size, lon1d.size
-    lon2d = np.broadcast_to(lon1d_adj[None, :], (H, W))
+    lon2d = np.broadcast_to(lon1d[None, :], (H, W))
     lat2d = np.broadcast_to(lat1d[:, None], (H, W))
 
-    dist_km = haversine_km(lat2d, lon2d, center_lat, center_lon_adj)
-    vtheta = tangential_wind(u700, v700, lat2d, lon2d, center_lat, center_lon_adj)
+    vtheta = tangential_wind(u700, v700, lat2d, lon2d, center_lat, center_lon_norm)
 
-    r_km, vtheta_profile = radial_profile(dist_km, vtheta, cfg.max_radius_km, cfg.radial_bin_km)
-    _, z_profile = radial_profile(dist_km, z700, cfg.max_radius_km, cfg.radial_bin_km)
+    max_bin_radius_km = cfg.target_radius_km + cfg.radial_bin_km
+    r_km, vtheta_profile = axisymmetric_mean(
+        vtheta,
+        lat1d,
+        lon1d,
+        center_lat,
+        center_lon_norm,
+        cfg.radial_bin_km,
+        max_bin_radius_km,
+    )
+    _, z_profile = axisymmetric_mean(
+        z700,
+        lat1d,
+        lon1d,
+        center_lat,
+        center_lon_norm,
+        cfg.radial_bin_km,
+        max_bin_radius_km,
+    )
 
-    i0 = int(np.argmin(np.abs(lat1d - center_lat)))
-    j0 = int(np.argmin(np.abs(lon1d_adj - center_lon_adj)))
-    z0 = float(z700[i0, j0]) if np.isfinite(z700[i0, j0]) else float("nan")
+    z0 = nearest_grid_value(z700, lat1d, lon1d, center_lat, center_lon_norm)
     zR = interp_profile(r_km, z_profile, cfg.target_radius_km)
     delta_z_sim = zR - z0 if np.isfinite(zR) and np.isfinite(z0) else float("nan")
 
     omega = 7.2921159e-5
     f = 2.0 * omega * np.sin(np.deg2rad(center_lat))
     r_m = r_km * 1000.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        integrand = vtheta_profile * vtheta_profile / r_m + f * vtheta_profile
-    mask = np.isfinite(integrand) & (r_m > 0.0) & (r_km <= cfg.target_radius_km)
+    r_safe = np.where(r_m > 0.0, r_m, np.nan)
+    integrand = vtheta_profile * vtheta_profile / r_safe + f * vtheta_profile
+    max_integral_km = cfg.target_radius_km + cfg.radial_bin_km
+    mask = np.isfinite(integrand) & np.isfinite(r_m) & (r_km <= max_integral_km)
     if np.sum(mask) >= 2:
         delta_z_gwb = float(np.trapz(integrand[mask], r_m[mask]) / 9.80665)
     else:
@@ -253,7 +272,7 @@ def compute_gwb(
         "z0": float(z0),
         "zR": float(zR),
         "center_lat": float(center_lat),
-        "center_lon": float(center_lon_adj),
+        "center_lon": float(center_lon_norm),
     }
 
 
@@ -314,7 +333,7 @@ def main() -> None:
         lat1d, lon1d = to_1d_lat_lon(np.load(lat_path), np.load(lon_path))
     else:
         lat1d, lon1d = to_1d_lat_lon(np.load(cfg.lat_path), np.load(cfg.lon_path))
-
+    print(upper_path)
     forecast_fields = load_upper_fields(upper_path, lat1d, lon1d, cfg)
     forecast_center = choose_center(row, "forecast")
     forecast_result = compute_gwb(
@@ -350,11 +369,11 @@ def main() -> None:
     if not isinstance(axes, np.ndarray):
         axes = np.array([axes])
 
-    lon1d_adj, center_lon_adj = adjust_lon_grid(lon1d, forecast_center[1])
-    lon2d = np.broadcast_to(lon1d_adj[None, :], (lat1d.size, lon1d.size))
+    forecast_center_lon_norm = normalize_lon(lon1d, forecast_center[1])
+    lon2d = np.broadcast_to(lon1d[None, :], (lat1d.size, lon1d.size))
     lat2d = np.broadcast_to(lat1d[:, None], (lat1d.size, lon1d.size))
-    pcm = axes[0].pcolormesh(lon2d, lat2d, forecast_fields["z700"], shading="auto", cmap="turbo")
-    axes[0].plot(center_lon_adj, forecast_center[0], "ko", markersize=4)
+    pcm = axes[0].pcolormesh(lon2d, lat2d, forecast_fields["z700"], shading="auto", cmap="viridis")
+    axes[0].plot(forecast_center_lon_norm, forecast_center[0], "ko", markersize=4)
     axes[0].set_title("Forecast z700")
     axes[0].set_xlabel("Longitude")
     axes[0].set_ylabel("Latitude")
@@ -362,11 +381,11 @@ def main() -> None:
 
     if target_result is not None:
         base_lat1d, base_lon1d = to_1d_lat_lon(np.load(cfg.lat_path), np.load(cfg.lon_path))
-        lon1d_adj, center_lon_adj = adjust_lon_grid(base_lon1d, choose_center(row, "bst")[1])
-        lon2d = np.broadcast_to(lon1d_adj[None, :], (base_lat1d.size, base_lon1d.size))
+        target_center_lon_norm = normalize_lon(base_lon1d, choose_center(row, "bst")[1])
+        lon2d = np.broadcast_to(base_lon1d[None, :], (base_lat1d.size, base_lon1d.size))
         lat2d = np.broadcast_to(base_lat1d[:, None], (base_lat1d.size, base_lon1d.size))
-        pcm2 = axes[1].pcolormesh(lon2d, lat2d, target_fields["z700"], shading="auto", cmap="turbo")
-        axes[1].plot(center_lon_adj, choose_center(row, "bst")[0], "ko", markersize=4)
+        pcm2 = axes[1].pcolormesh(lon2d, lat2d, target_fields["z700"], shading="auto", cmap="viridis")
+        axes[1].plot(target_center_lon_norm, choose_center(row, "bst")[0], "ko", markersize=4)
         axes[1].set_title("Target z700")
         axes[1].set_xlabel("Longitude")
         axes[1].set_ylabel("Latitude")
