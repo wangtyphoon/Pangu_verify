@@ -35,13 +35,13 @@ UPPER_LAYER = (600.0, 300.0)
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    csv_path: Path = Path("tc_bst_msl_metrics35.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    output_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    output_path: Path = Path("tc_bst_msl_metrics35.csv")
     max_radius_km: float = 500.0
     z_is_geopotential: bool = True
 
@@ -400,8 +400,8 @@ def compute_vt_indicators(delta_z_profile: dict[int, float]) -> dict[str, float]
     return {
         "lower_slope": lower_slope,
         "upper_slope": upper_slope,
-        "neg_vt_lower": -lower_slope if np.isfinite(lower_slope) else float("nan"),
-        "neg_vt_upper": -upper_slope if np.isfinite(upper_slope) else float("nan"),
+        "vt_lower": lower_slope if np.isfinite(lower_slope) else float("nan"),
+        "vt_upper": upper_slope if np.isfinite(upper_slope) else float("nan"),
     }
 
 
@@ -486,8 +486,8 @@ def main() -> None:
                     cfg.max_radius_km,
                 )
                 vt_result = compute_vt_indicators(vt_profile)
-                f_vtu = vt_result["neg_vt_upper"]
-                f_vtl = vt_result["neg_vt_lower"]
+                f_vtu = vt_result["vt_upper"]
+                f_vtl = vt_result["vt_lower"]
 
         bst_lat = row.get("bst_lat", np.nan)
         bst_lon = row.get("bst_lon", np.nan)
@@ -520,8 +520,8 @@ def main() -> None:
                     cfg.max_radius_km,
                 )
                 vt_result = compute_vt_indicators(vt_profile)
-                t_vtu = vt_result["neg_vt_upper"]
-                t_vtl = vt_result["neg_vt_lower"]
+                t_vtu = vt_result["vt_upper"]
+                t_vtl = vt_result["vt_lower"]
 
         forecast_b_param.append(f_b)
         forecast_vtu.append(f_vtu)

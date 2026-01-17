@@ -41,7 +41,7 @@ class Config:
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    step_target: int = 8
+    step_target: int = 1
     row_index: int = 0
     max_radius_km: float = 500.0
     z_is_geopotential: bool = True
@@ -304,8 +304,8 @@ def compute_vt_indicators(delta_z_profile: dict[int, float]) -> dict[str, float]
     return {
         "lower_slope": lower_slope,
         "upper_slope": upper_slope,
-        "neg_vt_lower": -lower_slope if np.isfinite(lower_slope) else float("nan"),
-        "neg_vt_upper": -upper_slope if np.isfinite(upper_slope) else float("nan"),
+        "vt_lower": lower_slope if np.isfinite(lower_slope) else float("nan"),
+        "vt_upper": upper_slope if np.isfinite(upper_slope) else float("nan"),
     }
 
 
@@ -321,10 +321,10 @@ def print_profile(label: str, delta_z_profile: dict[int, float]) -> None:
 def print_result(label: str, center_lat: float, center_lon: float, vt: dict[str, float]) -> None:
     print(f"[{label}] center lat={center_lat:.3f}, lon={center_lon:.3f}")
     print(
-        f"[{label}] slope d(ΔZ)/dlnp lower(925-600) = {vt['lower_slope']:.4f}, -VT^L = {vt['neg_vt_lower']:.4f}"
+        f"[{label}] slope d(ΔZ)/dlnp lower(925-600) = {vt['lower_slope']:.4f}, VT^L = {vt['vt_lower']:.4f}"
     )
     print(
-        f"[{label}] slope d(ΔZ)/dlnp upper(600-300) = {vt['upper_slope']:.4f}, -VT^U = {vt['neg_vt_upper']:.4f}"
+        f"[{label}] slope d(ΔZ)/dlnp upper(600-300) = {vt['upper_slope']:.4f}, VT^U = {vt['vt_upper']:.4f}"
     )
 
 
