@@ -333,7 +333,6 @@ def main() -> None:
         lat1d, lon1d = to_1d_lat_lon(np.load(lat_path), np.load(lon_path))
     else:
         lat1d, lon1d = to_1d_lat_lon(np.load(cfg.lat_path), np.load(cfg.lon_path))
-    print(upper_path)
     forecast_fields = load_upper_fields(upper_path, lat1d, lon1d, cfg)
     forecast_center = choose_center(row, "forecast")
     forecast_result = compute_gwb(
