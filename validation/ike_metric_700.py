@@ -19,11 +19,11 @@ class Config:
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    step_target: int = 8
+    step_target: int = 1
     row_index: int = 0
     center_source: str = "forecast"  # "forecast" or "bst"
     radius_km: float = 750.0
-    thickness_m: float = 0.0
+    thickness_m: float = 1000.0
 
 PANGU_CHANNEL_LEVEL_MAP = {
     "u700": (3, 3),
