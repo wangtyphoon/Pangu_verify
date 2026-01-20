@@ -8,7 +8,7 @@ from subset import extract_subset
 
 # === 路徑設定（請依實際檔案位置調整）===
 # results 底下的 run 資料夾，內含 output_upper_*.npy
-RUN_DIR = Path(r"../results/2024-07-18-00-00to2024-07-21-00-00")
+RUN_DIR = Path(r"../results/2024-07-21-00-00")
 # ERA5 真值根目錄
 ERA5_ROOT = Path(r"../forecasts")
 # 含 latitude/longitude 的 upper.nc，用來裁切 192x192 區域
@@ -28,10 +28,14 @@ CHANNEL_LEVEL_MAP = {
 
 GRID_SHAPE = (192, 192)
 SHOW_FIGURE = False
-VALUE_CMAP = "viridis"
+VALUE_CMAP = "jet"
 ERROR_CMAP = "bwr"
 LOSS_CMAP = "magma"
 OUTPUT_DIR = Path("figures")
+LEAD_HOURS = [24, 48, 72]  # to plot specific lead hours only
+USE_CARTOPY = True
+TERRAIN_ALPHA = 0.35
+MAP_DATA_ALPHA = 0.9
 
 
 def parse_dt(dt_str: str) -> datetime:
@@ -52,6 +56,29 @@ def to_hw(arr: np.ndarray) -> np.ndarray:
     if arr.ndim == 2 and (arr.shape[0] == GRID_SHAPE[0] * GRID_SHAPE[1] or arr.shape[1] == GRID_SHAPE[0] * GRID_SHAPE[1]):
         return arr.reshape(GRID_SHAPE)
     raise ValueError(f"無法 reshape 到 {GRID_SHAPE}，目前 shape={arr.shape}")
+
+
+def load_lat_lon() -> Tuple[np.ndarray, np.ndarray] | None:
+    lat_path = Path("lat.npy")
+    lon_path = Path("lon.npy")
+    if not (lat_path.exists() and lon_path.exists()):
+        return None
+
+    lat = np.load(lat_path)
+    lon = np.load(lon_path)
+
+    if lat.ndim == 1 and lon.ndim == 1:
+        if lat.size != GRID_SHAPE[0] or lon.size != GRID_SHAPE[1]:
+            return None
+        lon2d, lat2d = np.meshgrid(lon, lat)
+        return lon2d, lat2d
+
+    if lat.ndim == 2 and lon.ndim == 2:
+        if lat.shape != GRID_SHAPE or lon.shape != GRID_SHAPE:
+            return None
+        return lon, lat
+
+    return None
 
 
 def forecast_to_dict(forecast_data: np.ndarray) -> Dict[str, np.ndarray]:
@@ -87,6 +114,21 @@ def load_step(forecast_file: Path) -> Tuple[str, Dict[str, np.ndarray], Dict[str
     return target_dt, forecast_dict, truth_dict
 
 
+def get_run_start_dt() -> datetime | None:
+    run_name = RUN_DIR.name
+    try:
+        return parse_dt(run_name)
+    except ValueError:
+        pass
+    if "to" in run_name:
+        start_str = run_name.split("to")[0]
+        try:
+            return parse_dt(start_str)
+        except ValueError:
+            return None
+    return None
+
+
 def collect_steps() -> List[Tuple[str, Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
     if not RUN_DIR.exists():
         raise FileNotFoundError(f"找不到 RUN_DIR：{RUN_DIR}")
@@ -95,8 +137,18 @@ def collect_steps() -> List[Tuple[str, Dict[str, np.ndarray], Dict[str, np.ndarr
     if not files:
         raise FileNotFoundError(f"{RUN_DIR} 裡沒有 output_upper_*.npy")
 
+    lead_hours = set(LEAD_HOURS) if LEAD_HOURS else None
+    start_dt = get_run_start_dt() if lead_hours else None
+    if lead_hours and start_dt is None:
+        raise ValueError("需要可解析的 RUN_DIR 起始時間才能篩選 lead hours。")
+
     steps = []
     for f in files:
+        if lead_hours:
+            target_dt = parse_dt(f.stem[len("output_upper_") :])
+            lead_hour = int((target_dt - start_dt).total_seconds() // 3600)
+            if lead_hour not in lead_hours:
+                continue
         steps.append(load_step(f))
     return steps
 
@@ -151,6 +203,19 @@ def visualize(prepared, stats):
     if not SHOW_FIGURE:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    use_cartopy = False
+    lon2d = lat2d = None
+    if USE_CARTOPY:
+        try:
+            import cartopy.crs as ccrs
+            import cartopy.feature as cfeature
+        except ModuleNotFoundError:
+            use_cartopy = False
+        else:
+            latlon = load_lat_lon()
+            if latlon is not None:
+                lon2d, lat2d = latlon
+                use_cartopy = True
 
     n_steps = len(prepared)
     if n_steps == 0:
@@ -162,9 +227,18 @@ def visualize(prepared, stats):
     run_name = RUN_DIR.name
     start_dt = run_name.split("to")[0] if "to" in run_name else run_name
     final_target = prepared[-1]["target"]
+    map_extent = None
+    if use_cartopy:
+        map_extent = [
+            float(np.nanmin(lon2d)),
+            float(np.nanmax(lon2d)),
+            float(np.nanmin(lat2d)),
+            float(np.nanmax(lat2d)),
+        ]
 
     for var in VARS:
-        fig, axes = plt.subplots(4, n_steps, figsize=(4 * n_steps, 13))
+        subplot_kw = {"projection": ccrs.PlateCarree()} if use_cartopy else None
+        fig, axes = plt.subplots(4, n_steps, figsize=(4 * n_steps, 13), subplot_kw=subplot_kw)
         axes = np.asarray(axes).reshape(4, n_steps)
 
         vmin = stats[var]["vmin"]
@@ -181,11 +255,69 @@ def visualize(prepared, stats):
             loss = data["loss"]
             bias_val = data["bias"]
 
-            im_fc = axes[0, col].imshow(fc, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
-            im_tr = axes[1, col].imshow(tr, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
-            # Bias panel shows spatial bias (forecast - truth) with title indicating mean bias.
-            im_bias = axes[2, col].imshow(err, cmap="coolwarm", vmin=-bias_max, vmax=bias_max)
-            im_loss = axes[3, col].imshow(loss, cmap=LOSS_CMAP, vmin=0, vmax=loss_max)
+            if use_cartopy:
+                for row in range(4):
+                    ax = axes[row, col]
+                    ax.add_feature(cfeature.LAND, facecolor="0.92", edgecolor="none", zorder=0)
+                    ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=0)
+                    ax.add_feature(cfeature.COASTLINE, lw=0.4, zorder=2)
+                    if map_extent:
+                        ax.set_extent(map_extent, crs=ccrs.PlateCarree())
+
+                im_fc = axes[0, col].pcolormesh(
+                    lon2d,
+                    lat2d,
+                    fc,
+                    cmap=VALUE_CMAP,
+                    vmin=vmin,
+                    vmax=vmax,
+                    transform=ccrs.PlateCarree(),
+                    shading="auto",
+                    alpha=MAP_DATA_ALPHA,
+                    zorder=1,
+                )
+                im_tr = axes[1, col].pcolormesh(
+                    lon2d,
+                    lat2d,
+                    tr,
+                    cmap=VALUE_CMAP,
+                    vmin=vmin,
+                    vmax=vmax,
+                    transform=ccrs.PlateCarree(),
+                    shading="auto",
+                    alpha=MAP_DATA_ALPHA,
+                    zorder=1,
+                )
+                im_bias = axes[2, col].pcolormesh(
+                    lon2d,
+                    lat2d,
+                    err,
+                    cmap=ERROR_CMAP,
+                    vmin=-bias_max,
+                    vmax=bias_max,
+                    transform=ccrs.PlateCarree(),
+                    shading="auto",
+                    alpha=MAP_DATA_ALPHA,
+                    zorder=1,
+                )
+                im_loss = axes[3, col].pcolormesh(
+                    lon2d,
+                    lat2d,
+                    loss,
+                    cmap=LOSS_CMAP,
+                    vmin=0,
+                    vmax=loss_max,
+                    transform=ccrs.PlateCarree(),
+                    shading="auto",
+                    alpha=MAP_DATA_ALPHA,
+                    zorder=1,
+                )
+            else:
+                im_fc = axes[0, col].imshow(fc, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
+                im_tr = axes[1, col].imshow(tr, cmap=VALUE_CMAP, vmin=vmin, vmax=vmax)
+                # Bias panel shows spatial bias (forecast - truth) with title indicating mean bias.
+                im_bias = axes[2, col].imshow(err, cmap=ERROR_CMAP, vmin=-bias_max, vmax=bias_max)
+                im_loss = axes[3, col].imshow(loss, cmap=LOSS_CMAP, vmin=0, vmax=loss_max)
 
             colorbars[0] = im_fc
             colorbars[1] = im_tr
