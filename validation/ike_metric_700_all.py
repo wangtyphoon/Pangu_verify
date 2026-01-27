@@ -23,15 +23,15 @@ P700_PA = 70000.0
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    csv_path: Path = Path("tc_aurora_metrics35_step12.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    output_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    output_path: Path = Path("tc_aurora_metrics35_step12.csv")
     radius_km: float = 750.0
-    thickness_m: float = 0.0
+    thickness_m: float = 1000.0
 
 
 def parse_ymdh(value: float | int | str) -> datetime:

@@ -13,7 +13,7 @@ from tc_tracker_bst_msl import surface_to_dict
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_z700_metrics35_step12.csv")
+    csv_path: Path = Path("tc_aurora_metrics35_step12.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")

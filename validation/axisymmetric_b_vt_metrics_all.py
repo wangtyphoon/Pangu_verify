@@ -35,13 +35,13 @@ UPPER_LAYER = (600.0, 300.0)
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35.csv")
+    csv_path: Path = Path("tc_aurora_metrics35_step12.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    output_path: Path = Path("tc_bst_msl_metrics35.csv")
+    output_path: Path = Path("tc_aurora_metrics35_step12.csv")
     max_radius_km: float = 500.0
     z_is_geopotential: bool = True
 

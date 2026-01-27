@@ -17,12 +17,12 @@ from tc_tracker_bst_msl import (
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    csv_path: Path = Path("tc_aurora_metrics35_step28.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
-    output_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    output_path: Path = Path("tc_aurora_metrics35_step28.csv")
     r8_threshold: float = 8.0
     max_radius_km: float = 2000.0
     radial_bin_km: float = 25.0

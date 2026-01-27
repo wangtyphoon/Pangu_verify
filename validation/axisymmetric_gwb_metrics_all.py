@@ -22,13 +22,13 @@ PANGU_LEVELS = 13
 
 @dataclass(frozen=True)
 class Config:
-    csv_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    csv_path: Path = Path("tc_aurora_metrics35_step28.csv")
     results_dir: Path = Path("../results")
     era5_dir: Path = Path("../forecasts")
     lat_path: Path = Path("lat.npy")
     lon_path: Path = Path("lon.npy")
     upper_nc_path: Path = Path("../upper.nc")
-    output_path: Path = Path("tc_bst_msl_metrics35_step12.csv")
+    output_path: Path = Path("tc_aurora_metrics35_step28.csv")
     max_radius_km: float = 2000.0
     radial_bin_km: float = 25.0
     radii_km: tuple[float, float] = (100.0, 500.0)
