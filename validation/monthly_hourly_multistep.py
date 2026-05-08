@@ -12,7 +12,7 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parent
-INPUT_CSV = ROOT / "rmse_multistep_prs.csv"
+INPUT_CSV = ROOT / "rmse_multistep_prs72.csv"
 
 
 def load_data() -> pd.DataFrame:
@@ -65,19 +65,19 @@ def main() -> None:
     # 整體（不分 lead）依月份/時段
     monthly_mean, monthly_std = aggregate(df, "month")
     hourly_mean, hourly_std = aggregate(df, "hour")
-    save(monthly_mean, "monthly_mean_rmse_multistep.csv")
-    save(monthly_std, "monthly_std_rmse_multistep.csv")
-    save(hourly_mean, "hourly_mean_rmse_multistep.csv")
-    save(hourly_std, "hourly_std_rmse_multistep.csv")
+    save(monthly_mean, "monthly_mean_rmse_multistep72.csv")
+    save(monthly_std, "monthly_std_rmse_multistep72.csv")
+    save(hourly_mean, "hourly_mean_rmse_multistep72.csv")
+    save(hourly_std, "hourly_std_rmse_multistep72.csv")
 
     # 依 lead_hours 分組的月份/時段
     if "lead_hours" in df.columns:
         monthly_mean_lead, monthly_std_lead = aggregate(df, ["month", "lead_hours"])
         hourly_mean_lead, hourly_std_lead = aggregate(df, ["hour", "lead_hours"])
-        save(monthly_mean_lead, "monthly_mean_rmse_multistep_by_lead.csv")
-        save(monthly_std_lead, "monthly_std_rmse_multistep_by_lead.csv")
-        save(hourly_mean_lead, "hourly_mean_rmse_multistep_by_lead.csv")
-        save(hourly_std_lead, "hourly_std_rmse_multistep_by_lead.csv")
+        save(monthly_mean_lead, "monthly_mean_rmse_multistep_by_lead72.csv")
+        save(monthly_std_lead, "monthly_std_rmse_multistep_by_lead72.csv")
+        save(hourly_mean_lead, "hourly_mean_rmse_multistep_by_lead72.csv")
+        save(hourly_std_lead, "hourly_std_rmse_multistep_by_lead72.csv")
     else:
         print("輸入檔案缺少 lead_hours 欄位，跳過依 lead 分組的輸出。")
 

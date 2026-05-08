@@ -22,10 +22,10 @@ GRID_SHAPE = (192, 192)
 DEFAULT_OUTPUT_DIR = Path(r"D:\paper\vis_multi_steps\pangu")
 
 # Paths (edit these to match your environment)
-RUN_DIR = Path(r"../results/2024-09-29-12-00")
+RUN_DIR = Path(r"../results/2024-10-27-12-00")
 ERA5_ROOT = Path(r"../forecasts")
 REFERENCE_NC = ERA5_ROOT / "2020-05-05-00-00" / "upper.nc"
-LEAD_HOURS = [24, 48, 72, 96,120,144,168]  # Set to None to process all available steps
+LEAD_HOURS = [12,24,36, 48,60, 72, 96,120,144,168]  # Set to None to process all available steps
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 
 
