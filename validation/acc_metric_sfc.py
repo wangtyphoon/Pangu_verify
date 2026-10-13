@@ -110,24 +110,36 @@ def build_valid_start_set() -> set[str]:
     return set(dt.strftime("%Y-%m-%d-%H-%M") for dt in df2024["date_time"])
 
 
-def weighted_mean(field: np.ndarray) -> float:
-    return float(np.sum(field * weight_2d) / sum_w)
+def weighted_mean(field):
+    field = np.asarray(field,dtype=np.float64)
+    weights = np.asarray(weight_2d,dtype=np.float64)
+    keep = weights>0
+    if weights[keep].sum()<=1e-12 or not np.isfinite(field[keep]).all():
+        return float('nan')
+    return float(np.sum(weights[keep]*field[keep])/weights[keep].sum())
 
 
-def weighted_rms(field: np.ndarray) -> float:
-    return float(np.sqrt(np.sum(np.square(field) * weight_2d) / sum_w))
+def weighted_rms(field):
+    field = np.asarray(field,dtype=np.float64)
+    weights = np.asarray(weight_2d,dtype=np.float64)
+    keep = weights>0
+    if weights[keep].sum()<=1e-12 or not np.isfinite(field[keep]).all():
+        return float('nan')
+    return float(np.sqrt(np.sum(weights[keep]*field[keep]**2)/weights[keep].sum()))
 
 
-def compute_acc(f_anom: np.ndarray, o_anom: np.ndarray) -> float:
-    f_demean = f_anom - weighted_mean(f_anom)
-    o_demean = o_anom - weighted_mean(o_anom)
-    denom = np.sqrt(
-        np.sum(weight_2d * np.square(f_demean))
-        * np.sum(weight_2d * np.square(o_demean))
-    )
-    if denom == 0:
-        return float("nan")
-    return float(np.sum(weight_2d * f_demean * o_demean) / denom)
+def compute_acc(f_anom, o_anom):
+    f = np.asarray(f_anom,dtype=np.float64)
+    o = np.asarray(o_anom,dtype=np.float64)
+    weights = np.asarray(weight_2d,dtype=np.float64)
+    if not np.isfinite(weights).all() or (weights<0).any():
+        raise ValueError('Weights must be finite and nonnegative')
+    keep = weights>0
+    f,o,w = f[keep],o[keep],weights[keep]
+    if not np.isfinite(f).all() or not np.isfinite(o).all() or w.sum()<=1e-12:
+        return float('nan')
+    den = np.sqrt(np.sum(w*f*f)*np.sum(w*o*o))
+    return float(np.sum(w*f*o)/den) if den>1e-12 else float('nan')
 
 
 def climate_path_from_datetime(dt: datetime) -> str:
@@ -187,8 +199,8 @@ def evaluate_run(run_dir):
             print(f"[WARN] Skip {dt_str}: missing climate file {clim_path}")
             continue
 
-        fc_data = np.load(fc_path)
-        er_data = np.load(er_path)
+        fc_data = np.load(fc_path, mmap_mode='r')
+        er_data = np.load(er_path, mmap_mode='r')
         fc_dict = surface_to_dict(fc_data, reference_nc)
         er_dict = surface_to_dict(er_data, reference_nc)
 
@@ -288,7 +300,7 @@ def main(max_workers: int | None = None):
             acc_df = df.groupby("lead_hours")[acc_cols].mean()
             lead_df = acc_df
         if activity_cols:
-            activity_df = df.groupby("lead_hours")[activity_cols].mean()
+            activity_df = df.groupby('lead_hours')[activity_cols].agg(lambda values: np.sqrt(np.nanmean(np.square(values))))
             lead_df = activity_df if lead_df is None else pd.concat(
                 [lead_df, activity_df], axis=1
             )

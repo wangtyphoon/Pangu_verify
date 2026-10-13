@@ -20,6 +20,40 @@ PANGU_CHANNELS = 5
 PANGU_LEVELS = 13
 
 
+
+G = 9.80665
+
+def integrate_gwb(r_m, vtheta, f: float, radius_m: float) -> tuple[float, str]:
+    r = np.asarray(r_m, dtype=float)
+    v = np.asarray(vtheta, dtype=float)
+    if r.ndim != 1 or v.shape != r.shape or not len(r):
+        raise ValueError('Expected matching nonempty one-dimensional profiles')
+    if not np.isfinite(r).all() or np.any(r <= 0) or np.any(np.diff(r) <= 0):
+        raise ValueError('Ring centers must be finite, positive and increasing')
+    if not np.isfinite(f) or not np.isfinite(radius_m) or radius_m <= 0:
+        return float('nan'), 'invalid_center_or_radius'
+    upper = int(np.searchsorted(r, radius_m, side='left'))
+    if upper == len(r):
+        return float('nan'), 'missing_endpoint_support'
+    needed = v[:upper + 1]
+    if not np.isfinite(needed[0]):
+        return float('nan'), 'missing_first_ring'
+    if not np.isfinite(needed).all():
+        return float('nan'), 'missing_required_ring'
+    with np.errstate(over='ignore', invalid='ignore'):
+        q = needed ** 2 / r[:upper + 1] + f * needed
+    if not np.isfinite(q).all():
+        return float('nan'), 'nonfinite_integrand'
+    support_r = np.r_[0., r[:upper + 1]]
+    support_q = np.r_[0., q]
+    inner = r < radius_m
+    nodes = np.r_[0., r[inner], radius_m]
+    values = np.interp(nodes, support_r, support_q)
+    # The trapezoid sum also supports NumPy versions predating np.trapezoid.
+    integral = np.sum((values[1:] + values[:-1]) * np.diff(nodes) * 0.5)
+    return float(integral / G), 'ok'
+
+
 @dataclass(frozen=True)
 class Config:
     csv_path: Path = Path("tc_aurora_metrics35_step28.csv")
@@ -253,19 +287,12 @@ def compute_gwb_multi(
     omega = 7.2921159e-5
     f = 2.0 * omega * np.sin(np.deg2rad(center_lat))
     r_m = r_km * 1000.0
-    r_safe = np.where(r_m > 0.0, r_m, np.nan)
-    integrand = vtheta_profile * vtheta_profile / r_safe + f * vtheta_profile
 
     results: dict[str, float] = {}
     for radius_km in cfg.radii_km:
         zR = interp_profile(r_km, z_profile, radius_km)
         delta_z_sim = zR - z0 if np.isfinite(zR) and np.isfinite(z0) else float("nan")
-        max_integral_km = radius_km + cfg.radial_bin_km
-        mask = np.isfinite(integrand) & np.isfinite(r_m) & (r_km <= max_integral_km)
-        if np.sum(mask) >= 2:
-            delta_z_gwb = float(np.trapz(integrand[mask], r_m[mask]) / 9.80665)
-        else:
-            delta_z_gwb = float("nan")
+        delta_z_gwb, _ = integrate_gwb(r_m, vtheta_profile, f, radius_km * 1000.0)
         results[f"delta_z_sim_{int(radius_km)}"] = float(delta_z_sim)
         results[f"delta_z_gwb_{int(radius_km)}"] = float(delta_z_gwb)
     return results
